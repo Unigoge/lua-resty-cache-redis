@@ -1,0 +1,3 @@
+#!/bin/bash
+
+curl "http://localhost:8888/ngx/cache/example/search?login=user_1_overwritten" | python -m json.tool

@@ -1,0 +1,3 @@
+#!/bin/bash
+
+curl "http://localhost:8888/ngx/cache/example_upsync/dump" | python -m json.tool

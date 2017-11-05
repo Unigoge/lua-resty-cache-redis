@@ -1,0 +1,4 @@
+#!/bin/bash
+
+curl "http://localhost:8888/ngx/cache/example_upsync/search?public=Y" | python -m json.tool
+curl "http://localhost:8888/ngx/cache/example_upsync/search?public=N" | python -m json.tool

@@ -1,0 +1,3 @@
+#!/bin/bash
+
+curl -X PUT -H "Content-Type: application/json" "http://localhost:8888/ngx/cache/example/replace" --data @example_overwrite.json | python -m json.tool

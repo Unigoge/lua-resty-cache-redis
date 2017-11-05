@@ -1,0 +1,3 @@
+#!/bin/bash
+
+curl -X PATCH -H "Content-Type: application/json" "http://localhost:8888/ngx/cache/example/update" --data @example_update.json | python -m json.tool

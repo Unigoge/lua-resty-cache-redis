@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "name": "attribute_1",
+    "public": "Y"
+  },
+  {
+    "id": 2,
+    "name": "attribute_2",
+    "public": "Y"
+  },
+  {
+    "id": 3,
+    "name": "attribute_3",
+    "public": "Y"
+  },
+  {
+    "id": 4,
+    "name": "attribute_4",
+    "public": "N"
+  },
+  {
+    "id": 5,
+    "name": "attribute_5",
+    "public": "N"
+  }
+]

@@ -1,0 +1,3 @@
+#!/bin/bash
+
+curl -X POST -H "Content-Type: application/json" "http://localhost:8888/ngx/cache/example/add" --data @example_add.json | python -m json.tool
