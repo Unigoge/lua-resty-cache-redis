@@ -14,7 +14,7 @@ local ftype = common.ftype
 
 local tinsert, tconcat, tremove, tsort = table.insert, table.concat, table.remove, table.sort
 local tostring, tonumber = tostring, tonumber
-local pairs, ipairs = pairs, ipairs
+local pairs, ipairs, next = pairs, ipairs, next
 local assert, type, unpack, pcall = assert, type, unpack, pcall
 local min = math.min
 local crc32 = ngx.crc32_short
@@ -23,6 +23,8 @@ local ngx_now, ngx_time = ngx.now, ngx.time
 local ngx_var = ngx.var
 local ngx_log = ngx.log
 local ngx_null = ngx.null
+local sleep = ngx.sleep
+local worker_exiting = ngx.worker.exiting
 local DEBUG, INFO, WARN, ERR = ngx.DEBUG, ngx.INFO, ngx.WARN, ngx.ERR
 local thread_spawn, thread_wait = ngx.thread.spawn, ngx.thread.wait
 local json_encode, json_decode = cjson.encode, cjson.decode
@@ -735,17 +737,14 @@ function cache_class:set_unsafe(data, o)
             return "index=", cjson.encode(index), " add index_key=", index_key, " id=", key_part
           end)
           red:zadd(self.cache_id .. ":" .. index_key, "+inf", key_part)
-          red:zadd(key .. ":i", "+inf", index_key)
           if ttl then
             red:expire(index_key, ttl)
-            red:expire(key .. ":i", ttl)
           end
           reason = not reason.fun and { desc = "update()", fun = on_update } or reason
         end
         if obsolete or old_index_key ~= index_key then
           -- remove obsolete data
           red:zrem(self.cache_id .. ":" .. old_index_key, key_part)
-          red:zrem(key .. ":i", old_index_key)
           self:debug("update_index()", function()
             return "index=", cjson.encode(index), " remove index_key=", old_index_key, " id=", key_part
           end)
@@ -832,8 +831,10 @@ function cache_class:set_unsafe(data, o)
       -- update primary index and ttl
       if ttl then
         red:zadd(self.cache_id .. ":keys", time() + ttl, key_part)
-        -- setup ttl
-        red:expire(key, ttl)
+        -- DO NOT setup ttl - need for remove indexes
+        if #self.indexes == 0 then
+          red:expire(key, ttl)
+        end
       else
         red:zadd(self.cache_id .. ":keys", "+inf", key_part)
       end
@@ -904,23 +905,29 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       return "pk=", json_encode(pk)
     end)
 
-    local key
+    local key, key_part
+
     _, key = self:make_pk(pk)
+    key_part = self:make_key(pk)
 
-    local n = assert(red:del(key))
-    if n == 0 then
+    local db = assert(red:hgetall(key))
+    if #db == 0 then
+      -- not found
       return ngx_null
-    end
-
-    local ikeys
-    ikeys, err = self.redis:zscan(red, key .. ":i", "*")
-    if not ikeys then
-      return nil, err
     end
 
     red:init_pipeline()
 
     red:multi()
+
+    red:del(key)
+
+    with_indexes(self, {}, from_db(self.fields, red:array_to_hash(db)), nil, function(_, index_pair)
+      local index_key = unpack(index_pair)
+      if index_key then
+        red:zrem(self.cache_id .. ":" .. index_key, key_part)
+      end
+    end)
 
     local key_part = self:make_key(pk)
     red:zrem(self.cache_id .. ":keys", key_part)
@@ -929,10 +936,6 @@ function cache_class:delete_unsafe(pk, data, skip_log)
     end)
     foreachi(self.lists, function(field)
       red:del(key .. ":" .. field.dbfield)
-    end)
-    -- remove indexes
-    foreachi(ikeys, function(ikey)
-      red:zrem(self.cache_id .. ":" .. ikey.key .. ":i", key_part)
     end)
 
     red:exec()
@@ -1188,42 +1191,58 @@ function cache_class:memory_update()
 end
 
 local function get_memory(self, red, pk, callback)
-  if not self.memory then
+  local memory = self.memory
+  if not memory then
     return nil, "only for in-memory caches"
   end
+
   local ok, err = check_pk(self.fields, pk)
   if not ok then
     return nil, err
   end
-  local key = self:make_key(pk)
-  local result, flags = unpack(callback and { self.memory.dict:object_fun(key, function(val, flags)
-    callback(val, flags)
-    return val, flags
-  end) } or { self.memory.dict:object_get(key) })
-  self:debug("get_memory()", function()
-    return "lookup hot: pk=", json_encode(pk), " data=", result and json_encode(result) or "NOT_FOUND"
-  end)
-  if not result then
-    self:get_unsafe(pk, red, function(data, key, ttl)
-      ttl = ttl and min(ttl, self.memory.ttl or ttl) or nil
-      result, flags = self.memory.dict:object_fun(key, function(_, flags)
-        if callback then
-          callback(data)
-        end
-        return data, flags
-      end, ttl)
-    end)
-    if not result then
-      self.memory.dict:object_set(key, ngx_null, 10)
-    end
+
+  callback = callback or function() end
+
+  local key, val, flags
+  local memory_ttl = memory.ttl
+  local dict = memory.dict
+
+  if not memory_ttl or memory_ttl > 0 then
+    key = self:make_key(pk)
+    val, flags = unpack(callback and { dict:object_fun(key, function(val, flags)
+      callback(val, flags)
+      return val, flags
+    end) } or { dict:object_get(key) })
     self:debug("get_memory()", function()
-      return "save hot: pk=", json_encode(pk), " data=", json_encode(result)
+      return "lookup hot: pk=", json_encode(pk), " data=", val and json_encode(val) or "NOT_FOUND"
     end)
   end
-  if not result and not flags then
+
+  if not val then
+    self:get_unsafe(pk, red, function(data, key, ttl)
+      if not memory_ttl or memory_ttl > 0 then
+        ttl = ttl and min(ttl, memory_ttl or ttl) or nil
+        val, flags = dict:object_fun(key, function(_, flags)
+          return data, flags
+        end, ttl)
+        self:debug("get_memory()", function()
+          return "save hot: pk=", json_encode(pk), " data=", json_encode(val)
+        end)
+      else
+        val = data
+      end
+      if val then
+        callback(val)
+      end
+    end)
+  end
+
+  if not val then
+    dict:object_set(key, ngx_null, self.memory.ddos_timeout or 1)    
     return ngx_null
   end
-  return result, flags
+
+  return val, flags
 end
 
 function cache_class:get_memory_slave(pk, callback)
@@ -1237,9 +1256,13 @@ end
 function cache_class:get_by_index(data, o)
   assert(self.memory and self.memory.prefetch,
          "index operation is possible only with in-memory caches with prefetch")
+
   o = o or {}
-  local callback, filter = o.callback, o.filter or function(...) return true end
+
+  local callback, filter = o.callback, o.filter or function() return true end
   local pk, flags
+  local dict = self.memory.dict
+
   for i,index in ipairs(self.memory.indexes or {})
   do
     local idx_key = { "$i:" .. i }
@@ -1248,44 +1271,213 @@ function cache_class:get_by_index(data, o)
       assert(p, "break")
       tinsert(idx_key, p ~= ngx_null and p or "null")
     end) then
-      pk = self.memory.dict:object_get(tconcat(idx_key, ":"))
+      pk = dict:object_get(tconcat(idx_key, ":"))
       if pk then
         break
       end
     end
   end
+
   if not pk then
     return ngx_null
   end
+
   local items = {}
+
   foreachi(pk, function(k)
     local key = self:make_key(k)
-    local data, flags = unpack(callback and { self.memory.dict:object_fun(key, function(value, flags)
+    local data, flags = unpack(callback and { dict:object_fun(key, function(value, flags)
       callback(k, value, flags)
       return value, flags
-    end) } or { self.memory.dict:object_get(key) })
+    end) } or { dict:object_get(key) })
     local pk = self:key2pk(key)
     if filter(pk, data, flags) then
       tinsert(items, { pk, data, flags })
     end
   end)
+
   return #items ~= 0 and items or ngx_null
 end
 
-function cache_class:purge()
-  pcall(cache_desc_fixup, self)
-  return self.redis:handle(function(red)
-    local t = {}
-    foreachi(self.sets, function(field) tinsert(t, field) end)
-    foreachi(self.lists, function(field) tinsert(t, field) end)
-    self.redis:purge_keys(self.cache_name, self.cache_id, t)
-    red:del("L:" .. self.cache_name .. ":last_modified")
-    local ok, err = self:log_event(events.PURGE)
-    self:info("purge()", function()
-      return "purged"
+local function purge_by_chunk(self, red, index, next_keys_fn)
+  local count = 0
+
+  while not worker_exiting()
+  do
+    local start = now()
+    local keys = next_keys_fn()
+    if not next(keys) then
+      break
+    end
+    -- collect index keys
+    local arr = {}
+    red:init_pipeline()
+    foreach(keys, function(k)
+      tinsert(arr, k)
+      red:hgetall(self.cache_id .. ":" .. k)
     end)
-    return ok, err
-  end, self.redis_rw)
+    local index_keys = {}
+    foreachi(assert(red:commit_pipeline()), function(row)
+      local db = redis.get_row_result(row)
+      local index_keys_k = {}
+      if #db ~= 0 then
+        with_indexes(self, {}, from_db(self.fields, red:array_to_hash(db)), nil, function(_, index_pair)
+          local index_key = unpack(index_pair)
+          tinsert(index_keys_k, index_key)
+        end)
+      end
+      tinsert(index_keys, index_keys_k)
+    end)
+    red:init_pipeline()
+    -- flush data
+    local n = 0
+    foreachi(arr, function(key_part)
+      red:multi()
+      local key = self.cache_id .. ":" .. key_part
+      red:zrem(index, key_part)
+      foreachi(self.sets, function(field)
+        red:del(key .. ":" .. field.dbfield)
+      end)
+      foreachi(self.lists, function(field)
+        red:del(key .. ":" .. field.dbfield)
+      end)
+      -- remove indexes
+      foreachi(index_keys[1 + n], function(index_key)
+        red:zrem(self.cache_id .. ":" .. index_key, key_part)
+      end)
+      red:del(key)
+      red:exec()
+      n = n + 1
+    end)
+    assert(red:commit_pipeline())
+    if n ~= 0 then
+      self:info("purge_chunk()", function()
+        return "count=", n, " at ", now() - start, " seconds"
+      end)
+      count = count + n
+    end
+  end
+
+  return count
+end
+
+local function purge_keys(self, red)
+  local lock = self.redis:create_lock(self.cache_id, 10)
+  if not lock:aquire() then
+    self:warn("purge()", function()
+      return "can't aquire the lock ..."
+    end)
+    return nil, "locked"
+  end
+
+  local start = now()
+
+  local old = self.cache_id .. ":old"
+
+  local count = 0
+
+  repeat
+    local renamed, err = red:renamenx(self.cache_id .. ":keys", old)
+    assert(renamed or err:match("no such key"), err)
+
+    local cursor = "0"
+
+    count = count + purge_by_chunk(self, red, old, function()
+      local tmp = assert(red:zscan(old, cursor, "count", 100, "match", "*"))
+      local keys, err
+      cursor, keys, err = unpack(tmp)
+      assert(not err, err)
+      lock:prolong()
+      return red:array_to_hash(keys)
+    end)
+  until renamed == 1 or err:match("no such key")
+
+  assert(red:del(old))
+
+  lock:release()
+
+  if count ~= 0 then
+    self:info("purge()", function()
+      return "count=", count, " at ", now() - start, " seconds"
+    end)
+  end
+
+  return true
+end
+
+local function cleanup_keys(self, red)
+  local lock = self.redis:create_lock(self.cache_id, 10)
+  if not lock:aquire() then
+    return nil, "can't aquire the lock"
+  end
+
+  local start = now()
+
+  local index = self.cache_id .. ":keys"
+
+  local count = purge_by_chunk(self, red, index, function()
+    local keys = assert(red:zrangebyscore(index, 0, time(), "LIMIT", 0, 100))
+    lock:prolong()
+    local h = {}
+    foreachi(keys, function(k) h[k] = true end)
+    return h
+  end)
+
+  lock:release()
+
+  if count ~= 0 then
+    self:info("cleanup()", function()
+      return "count=", count, " at ", now() - start, " seconds"
+    end)
+  end
+
+  return true
+end
+
+function cache_class:purge(max_wait)
+  pcall(cache_desc_fixup, self)
+
+  local function purge()
+    return self.redis:handle(function(red)
+      local ok, err = purge_keys(self, red)
+      if not ok then
+        return nil, err
+      end
+      red:del("L:" .. self.cache_name .. ":last_modified")
+      return self:log_event(events.PURGE)
+    end, self.redis_rw)
+  end
+
+  local completed
+
+  local purge_job
+  purge_job = job.new("purge " .. self.cache_name, function()
+    local ok, ret, err = pcall(purge)
+    if ok and ret then
+      purge_job:stop()
+      purge_job:clean()
+      completed = true
+    elseif err ~= "locked" then
+      self:err("purge()", function()
+        return err
+      end)
+    end
+    return true
+  end, 1)
+
+  if purge_job:running() then
+    return nil, "already in progress"
+  end
+
+  purge_job:run()
+
+  local wait_to = now() + (max_wait or 0)
+
+  while not completed and now() < wait_to and not worker_exiting() do
+    sleep(0.1)
+  end
+
+  return completed and true or "async"
 end
 
 function cache_class:last_modified()
@@ -1417,7 +1609,17 @@ function cache_class:init()
   cache_desc_fixup(self)
 
   if self.ttl then
-    self.redis:cleanup_keys_job(self.cache_name, self.cache_id)
+    job.new("cleanup " .. self.cache_name, function()
+      self.redis:handle(function(red)
+        local ok, err = pcall(cleanup_keys, self, red)
+        if not ok then
+          self:err("cleanup_keys()", function()
+            return err
+          end)
+        end
+      end, self.redis_rw)
+      return true
+    end, 10):run()
   end
 
   local update_job = job.new("memory update " .. self.cache_name, function()
@@ -1542,6 +1744,8 @@ function _M.new(opts, redis_opts)
   opts.log = log_server.new(cache)
 
   init_memory(cache)
+
+  job.new("purge " .. opts.cache_name):clean()
 
   return cache
 end

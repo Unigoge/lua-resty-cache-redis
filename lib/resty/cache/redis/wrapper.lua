@@ -126,10 +126,13 @@ function redis_class:scan(red, pattern, callback)
   return keys
 end
 
-function redis_class:cleanup_keys_job(cache_name, cache_id)
+function redis_class:cleanup_keys_job(cache_name, cache_id, callback)
+  callback = callback or function() end
+
   local cleanup = function(red)
     local start = now()
-    local keys, err = red:zrangebyscore(cache_id .. ":keys", 0, start, "LIMIT", 0, 1000)
+
+    local keys, err = red:zrangebyscore(cache_id .. ":keys", 0, start, "LIMIT", 0, 100)
     if not keys then
       ngx_log(WARN, err)
       return 0
@@ -140,22 +143,14 @@ function redis_class:cleanup_keys_job(cache_name, cache_id)
       return 0
     end
 
-    local count, err = red:zcard(cache_id .. ":primary")
-    if not count then
-      ngx_log(WARN, err)
-      return 0
-    end
-
     red:init_pipeline()
 
     for j=1,#keys
     do
       local key = keys[j]
-      if count ~= 0 then
-        red:zrem(cache_id .. ":primary", key)
-      end
       red:del(key)
       red:zrem(cache_id .. ":keys", key)
+      callback(red, key)
     end
 
     local ok, err = red:commit_pipeline()
@@ -182,76 +177,6 @@ function redis_class:cleanup_keys_job(cache_name, cache_id)
     end, self.redis_rw)
     return true
   end, 10):run()
-end
-
-function redis_class:purge_keys(cache_name, cache_id)
-  local purge_data = function(red, key)
-    local count = 0
-    local cursor = "0"
-
-    repeat
-      local t = assert(red:zscan(key, cursor, "count", 1000, "match", "*"))
-      local keys, err
-      cursor, keys, err = unpack(t)
-      assert(not err, err)
-      if next(keys) then
-        keys = red:array_to_hash(keys)
-        -- collect index keys
-        local index_keys = {}
-        foreach(keys, function(k)
-          k = cache_id .. ":" .. k
-          local ikeys
-          ikeys = assert(self:zscan(red, k .. ":i", "*"))
-          local index_keys_k = {}
-          index_keys[k] = index_keys_k
-          foreachi(ikeys, function(ikey)
-            tinsert(index_keys_k, ikey.key)
-          end)
-        end)
-        red:init_pipeline()
-        -- flush data
-        foreach(keys, function(k)
-          red:multi()
-          -- flush pk
-          red:zrem(key, k)
-          -- flush key
-          k = cache_id .. ":" .. k
-          red:del(k)
-          -- flush index keys
-          foreachi(index_keys[k], function(ikey)
-            red:del(cache_id .. ":" .. ikey)
-          end)
-          -- flush key index references
-          red:del(k .. ":i")
-          red:exec()
-          count = count + 1
-        end)
-        assert(red:commit_pipeline())
-      end
-    until cursor == "0"
-
-    assert(red:del(key))
-
-    return count
-  end
-
-  local purge = function(red)
-    local count = 0
-
-    ngx_log(INFO, cache_name .. "_purge() begin")
-
-    repeat
-      local renamed, err = red:renamenx(cache_id .. ":keys", cache_id .. ":purge")
-      assert(renamed or err:match("no such key"), err)
-      count = count + purge_data(red, cache_id .. ":purge")
-    until renamed == 1 or err:match("no such key")
-
-    ngx_log(INFO, cache_name .. "_purge() end, count=", count)
-
-    return true
-  end
-
-  return self:handle(purge, self.redis_rw)
 end
 
 function redis_class:rw_socket()
