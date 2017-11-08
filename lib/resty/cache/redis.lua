@@ -20,6 +20,7 @@ local min = math.min
 local crc32 = ngx.crc32_short
 local update_time = ngx.update_time
 local ngx_now, ngx_time = ngx.now, ngx.time
+local ngx_var = ngx.var
 local ngx_log = ngx.log
 local ngx_null = ngx.null
 local DEBUG, INFO, WARN, ERR = ngx.DEBUG, ngx.INFO, ngx.WARN, ngx.ERR
@@ -358,22 +359,29 @@ end
 
 local cache_class = {}
 
+local function pstxid()
+  local ok, id = pcall(function()
+    return ngx_var.pstxid or ngx_var.request_id
+  end)
+  return ok and id or "job"
+end
+
 function cache_class:debug(f, fun)
   if self.debug_enabled then
-    ngx_log(DEBUG, self.cache_name, "_", f, " ", fun())
+    ngx_log(DEBUG, "[", pstxid() , "] ", self.cache_name, "_", f, " ", fun())
   end
 end
 
 function cache_class:info(f, fun)
-  ngx_log(INFO, self.cache_name, "_", f, " ", fun())
+  ngx_log(INFO, "[", pstxid() , "] ", self.cache_name, "_", f, " ", fun())
 end
 
 function cache_class:warn(f, fun)
-  ngx_log(WARN, self.cache_name, "_", f, " ", fun())
+  ngx_log(WARN, "[", pstxid() , "] ", self.cache_name, "_", f, " ", fun())
 end
 
 function cache_class:err(f, fun)
-  ngx_log(ERR, self.cache_name, "_", f, " ", fun())
+  ngx_log(ERR, "[", pstxid() , "] ", self.cache_name, "_", f, " ", fun())
 end
 
 function cache_class:make_pk(data)
@@ -1187,10 +1195,14 @@ local function get_memory(self, red, pk, callback)
   if not ok then
     return nil, err
   end
-  local result, flags = unpack(callback and { self.memory.dict:object_fun(self:make_key(pk), function(val, flags)
+  local key = self:make_key(pk)
+  local result, flags = unpack(callback and { self.memory.dict:object_fun(key, function(val, flags)
     callback(val, flags)
     return val, flags
-  end) } or { self.memory.dict:object_get(self:make_key(pk)) })
+  end) } or { self.memory.dict:object_get(key) })
+  self:debug("get_memory()", function()
+    return "lookup hot: pk=", json_encode(pk), " data=", result and json_encode(result) or "NOT_FOUND"
+  end)
   if not result then
     self:get_unsafe(pk, red, function(data, key, ttl)
       ttl = ttl and min(ttl, self.memory.ttl or ttl) or nil
@@ -1201,14 +1213,11 @@ local function get_memory(self, red, pk, callback)
         return data, flags
       end, ttl)
     end)
-    if result then
-      self:debug("get_memory()", function()
-        return "save hot: pk=", json_encode(pk), " data=", json_encode(result)
-      end)
+    if not result then
+      self.memory.dict:object_set(key, ngx_null, 10)
     end
-  else
     self:debug("get_memory()", function()
-      return "get hot: pk=", json_encode(pk), " data=", json_encode(result)
+      return "save hot: pk=", json_encode(pk), " data=", json_encode(result)
     end)
   end
   if not result and not flags then
