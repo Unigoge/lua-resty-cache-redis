@@ -140,8 +140,13 @@ local function cache_desc_fixup(cache)
       return index.id, hash
     end
 
+    cache.fields_indexed = {}
+
     foreachi(cache.fields, function(field)
       field.dbfield = dbfield(field.name)
+      if field.indexed then
+        tinsert(cache.fields_indexed, field.dbfield)
+      end
     end)
 
     foreachi(cache.indexes, function(index)
@@ -628,6 +633,33 @@ local function with_indexes(self, pk, new, old, fun)
   end)
 end
 
+local function decode_indexes(self, db)
+  local fields_indexed = self.fields_indexed
+
+  local values = {}
+  for i=1,#fields_indexed
+  do
+    local dbfield = fields_indexed[i]
+    values[dbfield] = db[i]
+  end
+
+  return from_db(self.fields, values)
+end
+
+local function get_indexes_values(self, red, key)
+  local fields_indexed = self.fields_indexed
+  if #fields_indexed == 0 then
+    return
+  end
+
+  local db = assert(red:hmget(key, unpack(fields_indexed)))
+  if db[1] == ngx_null then
+    return ngx_null
+  end
+
+  return decode_indexes(self, db)
+end
+
 function cache_class:set_unsafe(data, o)
   if not data then
     return nil, "bad args: data required"
@@ -842,6 +874,11 @@ function cache_class:set_unsafe(data, o)
 
     red:exec()
 
+    if self.wait then
+      red:wait(self.wait.slaves or 1,
+               self.wait.ms or 100)
+    end
+
     results = assert(red:commit_pipeline())
 
     ok, err = redis.check_pipeline(results)
@@ -910,8 +947,10 @@ function cache_class:delete_unsafe(pk, data, skip_log)
     _, key = self:make_pk(pk)
     key_part = self:make_key(pk)
 
-    local db = assert(red:hgetall(key))
-    if #db == 0 then
+    local exists = get_indexes_values(self, red, key) or (
+      assert(red:exists(key)) == 1 and {} or ngx_null
+    )
+    if exists == ngx_null then
       -- not found
       return ngx_null
     end
@@ -922,12 +961,14 @@ function cache_class:delete_unsafe(pk, data, skip_log)
 
     red:del(key)
 
-    with_indexes(self, {}, from_db(self.fields, red:array_to_hash(db)), nil, function(_, index_pair)
-      local index_key = unpack(index_pair)
-      if index_key then
-        red:zrem(self.cache_id .. ":" .. index_key, key_part)
-      end
-    end)
+    if next(exists) then
+      with_indexes(self, {}, exists, nil, function(_, index_pair)
+        local index_key = unpack(index_pair)
+        if index_key then
+          red:zrem(self.cache_id .. ":" .. index_key, key_part)
+        end
+      end)
+    end
 
     local key_part = self:make_key(pk)
     red:zrem(self.cache_id .. ":keys", key_part)
@@ -939,6 +980,11 @@ function cache_class:delete_unsafe(pk, data, skip_log)
     end)
 
     red:exec()
+
+    if self.wait then
+      red:wait(self.wait.slaves or 1,
+               self.wait.ms or 100)
+    end
 
     local results = assert(red:commit_pipeline())
 
@@ -1309,47 +1355,78 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
     if not next(keys) then
       break
     end
+
     -- collect index keys
-    local arr = {}
-    red:init_pipeline()
-    foreach(keys, function(k)
-      tinsert(arr, k)
-      red:hgetall(self.cache_id .. ":" .. k)
+    local bulk = {}
+    local fields_indexed = self.fields_indexed
+    local index_keys = #fields_indexed ~= 0 and {} or nil
+
+    if index_keys then
+      red:init_pipeline()
+    end
+
+    foreach(keys, function(key_part)
+      tinsert(bulk, key_part)
+      if index_keys then
+        red:hmget(self.cache_id .. ":" .. key_part, unpack(fields_indexed))
+      end
     end)
-    local index_keys = {}
-    foreachi(assert(red:commit_pipeline()), function(row)
-      local db = redis.get_row_result(row)
-      local index_keys_k = {}
-      if #db ~= 0 then
-        with_indexes(self, {}, from_db(self.fields, red:array_to_hash(db)), nil, function(_, index_pair)
+
+    if index_keys then
+      foreachi(assert(red:commit_pipeline()), function(row)
+        local index_values = redis.get_row_result(row)
+        local index_keys_k = {}
+        with_indexes(self, {}, decode_indexes(self, index_values), nil, function(_, index_pair)
           local index_key = unpack(index_pair)
           tinsert(index_keys_k, index_key)
         end)
-      end
-      tinsert(index_keys, index_keys_k)
-    end)
+        tinsert(index_keys, index_keys_k)
+      end)
+    end
+
     red:init_pipeline()
+
     -- flush data
     local n = 0
-    foreachi(arr, function(key_part)
+
+    foreachi(bulk, function(key_part)
       red:multi()
+
       local key = self.cache_id .. ":" .. key_part
+
+      -- remove from XX:keys
       red:zrem(index, key_part)
+
+      -- remove from XX:key:N set
       foreachi(self.sets, function(field)
         red:del(key .. ":" .. field.dbfield)
       end)
+
+      -- remove from XX:key:N list
       foreachi(self.lists, function(field)
         red:del(key .. ":" .. field.dbfield)
       end)
-      -- remove indexes
-      foreachi(index_keys[1 + n], function(index_key)
-        red:zrem(self.cache_id .. ":" .. index_key, key_part)
-      end)
+
+      if index_keys then 
+        -- remove indexes
+        foreachi(index_keys[1 + n], function(index_key)
+          red:zrem(self.cache_id .. ":" .. index_key, key_part)
+        end)
+      end
+
       red:del(key)
       red:exec()
+
       n = n + 1
     end)
+
+    if self.wait then
+      red:wait(self.wait.slaves or 1,
+               self.wait.ms or 10000)
+    end
+
     assert(red:commit_pipeline())
+
     if n ~= 0 then
       self:info("purge_chunk()", function()
         return "count=", n, " at ", now() - start, " seconds"
@@ -1375,24 +1452,27 @@ local function purge_keys(self, red)
   local old = self.cache_id .. ":old"
 
   local count = 0
+  local cursor = "0"
 
   repeat
     local renamed, err = red:renamenx(self.cache_id .. ":keys", old)
     assert(renamed or err:match("no such key"), err)
-
-    local cursor = "0"
-
     count = count + purge_by_chunk(self, red, old, function()
-      local tmp = assert(red:zscan(old, cursor, "count", 100, "match", "*"))
       local keys, err
-      cursor, keys, err = unpack(tmp)
-      assert(not err, err)
-      lock:prolong()
+      repeat
+        local tmp = assert(red:zscan(old, cursor, "count", 1000, "match", "*"))
+        cursor, keys, err = unpack(tmp)
+        assert(not err, err)
+        lock:prolong()
+      until cursor == "0" or #keys ~= 0
       return red:array_to_hash(keys)
     end)
   until renamed == 1 or err:match("no such key")
 
-  assert(red:del(old))
+  if cursor == "0" then
+    -- full
+    assert(red:del(old))
+  end
 
   lock:release()
 
@@ -1416,7 +1496,7 @@ local function cleanup_keys(self, red)
   local index = self.cache_id .. ":keys"
 
   local count = purge_by_chunk(self, red, index, function()
-    local keys = assert(red:zrangebyscore(index, 0, time(), "LIMIT", 0, 100))
+    local keys = assert(red:zrangebyscore(index, 0, time(), "LIMIT", 0, 1000))
     lock:prolong()
     local h = {}
     foreachi(keys, function(k) h[k] = true end)
@@ -1459,7 +1539,7 @@ function cache_class:purge(max_wait)
       completed = true
     elseif err ~= "locked" then
       self:err("purge()", function()
-        return err
+        return err or ret
       end)
     end
     return true
@@ -1686,9 +1766,9 @@ function _M.new(opts, redis_opts)
   do
     opts.indexes[i] = { fields = index }
     foreachi(index, function(name)
-      local field = find_if_i(opts.fields, function(field)
+      local field = unpack(find_if_i(opts.fields, function(field)
         return field.name == name
-      end)
+      end) or {})
       assert(field, "invalid index: field " .. name .. " is not found")
       field.indexed = true
     end)
@@ -1744,8 +1824,6 @@ function _M.new(opts, redis_opts)
   opts.log = log_server.new(cache)
 
   init_memory(cache)
-
-  job.new("purge " .. opts.cache_name):clean()
 
   return cache
 end

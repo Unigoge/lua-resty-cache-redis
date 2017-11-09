@@ -14,11 +14,11 @@ local CONFIG = ngx.shared.config
 
 local scope = CONFIG:get("ngx.caches.scope") or "ngx"
 
-local connect_timeout = CONFIG:get(scope .. ".upsync.timeout.connect") or 5000
-local send_timeout    = CONFIG:get(scope .. ".upsync.timeout.send")    or 5000
-local read_timeout    = CONFIG:get(scope .. ".upsync.timeout.read")    or 600000
-local pool_size       = CONFIG:get(scope .. ".upsync.socket.keepalive.pool_size")     or 10
-local pool_inactive   = CONFIG:get(scope .. ".upsync.socket.keepalive.pool_inactive") or 60
+local connect_timeout = CONFIG:get(scope .. ".caches.upsync.timeout.connect")                or 5000
+local send_timeout    = CONFIG:get(scope .. ".caches.upsync.timeout.send")                   or 5000
+local read_timeout    = CONFIG:get(scope .. ".caches.upsync.timeout.read")                   or 600000
+local pool_size       = CONFIG:get(scope .. ".caches.upsync.socket.keepalive.pool_size")     or 10
+local pool_inactive   = CONFIG:get(scope .. ".caches.upsync.socket.keepalive.pool_inactive") or 60
 
 local encode_args = ngx.encode_args
 local type = type

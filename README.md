@@ -64,11 +64,11 @@ init_by_lua_block {
 
   -- upsync http
 
-  CONFIG:set("ngx.upsync.timeout.connect", 5000)
-  CONFIG:set("ngx.upsync.timeout.send", 5000)
-  CONFIG:set("ngx.upsync.timeout.read", 5000)
-  CONFIG:set("ngx.upsync.socket.keepalive.pool_size", 100)
-  CONFIG:set("ngx.upsync.socket.keepalive.pool_inactive", 60000)
+  CONFIG:set("ngx.caches.upsync.timeout.connect", 5000)
+  CONFIG:set("ngx.caches.upsync.timeout.send", 5000)
+  CONFIG:set("ngx.caches.upsync.timeout.read", 5000)
+  CONFIG:set("ngx.caches.upsync.socket.keepalive.pool_size", 100)
+  CONFIG:set("ngx.caches.upsync.socket.keepalive.pool_inactive", 60000)
 
   -- init api
   local init = require "caches.init"
