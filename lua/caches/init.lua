@@ -1,5 +1,5 @@
 local _M = {
-  _VERSION = "7.8.0"
+  _VERSION = "0.1"
 }
 
 local cjson = require "cjson"
@@ -24,15 +24,6 @@ local function reply(opts)
   for k,v in pairs(opts.headers or {})
   do
     ngx_header[k] = v
-  end
-  for k,v in pairs(opts.cookies or {})
-  do
-    ngx.context.cookies:set {
-      key = k,
-      value = v,
-      path = sep_in_cfg.cookie_opts.path,
-      domain = sep_in_cfg.cookie_opts.domain
-    }
   end
   local body = opts.body or {
     error = opts.status >= HTTP_SPECIAL_RESPONSE and get_http_status_desc(opts.status) or nil

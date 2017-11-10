@@ -122,6 +122,10 @@ end
 function redis_with_sync:init_upsync()
   local prefetch_job = self:init()
 
+  if not self.upsync.interval then
+    return prefetch_job
+  end
+
   self.upsync_server = rest.new {
     sock = self.upsync.socket
   }
@@ -137,7 +141,7 @@ function redis_with_sync:init_upsync()
     self:aquire_lock()
     self:do_upsync()
     return true
-  end, self.upsync.interval)
+  end, self.upsync.interval > 0 and self.upsync.interval or 60)
 
   if prefetch_job then
     sync_job:wait_for(prefetch_job)
@@ -154,7 +158,7 @@ function _M.new(opts, redis_opts)
   local CONFIG = ngx.shared.config
   local scope = CONFIG:get("ngx.caches.scope") or "ngx"
   local storage = redis_opts and redis_opts.storage or "dictionary"
-  opts.upsync.interval = opts.upsync.interval or CONFIG:get(scope .. ".caches." .. opts.cache_name .. ".sync_interval") or 60
+  opts.upsync.interval = opts.upsync.interval or CONFIG:get(scope .. ".caches." .. opts.cache_name .. ".sync_interval")
   if redis_opts and not redis_opts.redis_rw then
     redis_opts = nil
   end
