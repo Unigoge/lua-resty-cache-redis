@@ -518,8 +518,8 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
         j = j + 1
         data = redis.get_row_result(results[i])
         expires = redis.get_row_result(results[i + 1])
-        expires = (expires ~= ngx_null and expires ~= "inf") and expires or nil
-        if #data ~= 0 then
+        expires = (expires ~= ngx_null and expires ~= "inf") and tonumber(expires) or nil
+        if #data ~= 0 and (not expires or expires > now()) then
           local object = red:array_to_hash(data)
           for k = 1,#self.sets
           do
@@ -538,7 +538,7 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
           end)
           foreach(self:key2pk(key), function(k,v) data[k] = v end)
           callback_on_get(red, data)
-          getter(data, key, expires and expires - now() or nil)
+          getter(data, key, expires - now() or nil)
         end
       end
     end
@@ -695,7 +695,7 @@ function cache_class:set_unsafe(data, o)
     old = redis.get_row_result(old)
     if old ~= ngx_null and #old ~= 0 then
       old_expires = redis.get_row_result(old_expires)
-      old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and old_expires - now() or nil
+      old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and tonumber(old_expires) - now() or nil
       if old_ttl and old_ttl < 0 then
         old_ttl = nil
       end
