@@ -16,7 +16,8 @@ local tinsert, tconcat, tremove, tsort = table.insert, table.concat, table.remov
 local tostring, tonumber = tostring, tonumber
 local pairs, ipairs, next = pairs, ipairs, next
 local assert, type, unpack, pcall = assert, type, unpack, pcall
-local min = math.min
+local setmetatable = setmetatable
+local max, min, floor = math.max, math.min, math.floor
 local crc32 = ngx.crc32_short
 local update_time = ngx.update_time
 local ngx_now, ngx_time = ngx.now, ngx.time
@@ -1148,7 +1149,7 @@ local function memory_prefetch(self)
 end
 
 local function do_memory_update(self, n)
-  local logid_old = self.memory.shm:get("logid")
+  local logid_old = self.memory.shm:get("logid") or self.log:log_id()
   local log, err = self.log:get_events(logid_old, n)
 
   if not log then
@@ -1269,7 +1270,12 @@ local function get_memory(self, red, pk, callback)
     end)
   end
 
-  if not val then
+  local minute = floor(time() / 60)
+
+  if val then
+    dict:incr("$h:" .. minute, 1, 0)
+  else
+    dict:incr("$m:" .. minute, 1, 0)
     self:get_unsafe(pk, red, function(data, key, ttl)
       if not memory_ttl or memory_ttl > 0 then
         local nomemory
@@ -1318,9 +1324,24 @@ local function memory_cleanup(self)
   end
 end
 
+function cache_class:hits(backward, m)
+  if not self.memory then
+    return nil, "no in-memory data"
+  end
+  backward, m = backward or 1, m or 1
+  local hits, miss = 0, 0
+  local minute = floor(time() / 60) - backward
+  for t = minute, minute + m
+  do
+    hits = hits + (self.memory.dict:get("$h:" .. t) or 0)
+    miss = miss + (self.memory.dict:get("$m:" .. t) or 0)  
+  end
+  return hits, miss
+end
+
 function cache_class:memory_scan(fun)
   foreachi(self.memory.dict:get_keys(0), function(key)
-    if not key:match("^$i:") then
+    if not key:match("^%$") then
       local data = self.memory.dict:object_get(key)
       if type(data) == "table" then
         fun(self:key2pk(key), data)
@@ -1749,6 +1770,20 @@ function cache_class:init()
     memory_cleanup(self)
     return true
   end, 1):run()
+
+  if not self.memory.prefetch then
+    job.new("memory hits " .. self.cache_name, function()
+      local p = max(60, self.memory.ttl) / 60
+      local hits, miss = self:hits(p, p)
+      if hits + miss == 0 then
+        return
+      end
+      self:info("memory_hits()", function()
+        return floor(100 * hits / (hits + miss)), "% hits=", hits, " misses=", miss
+      end)
+      return true
+    end, 60):run()
+  end
 
   local prefetch_job
   prefetch_job = job.new("memory prefetch " .. self.cache_name, function()
