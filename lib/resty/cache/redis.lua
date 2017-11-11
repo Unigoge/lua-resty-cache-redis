@@ -468,15 +468,16 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
 
   local get = function(red)
     local response = {}
-    local ok, err, data, ttl, expires
+    local ok, err, data, expires
 
     local key = self:make_key(pk)
     -- if type(key) is a table we have a multikey operation 
     local keys = type(key) == "table" and key or { { key = key } }
+    local PK = self.cache_id .. ":keys"
 
     if type(key) ~= "table" then
       if key:match("[%?%*%[]") then
-        keys = assert(self.redis:zscan(red, self.cache_id .. ":keys", key))
+        keys = assert(self.redis:zscan(red, PK, key))
       end
     end
 
@@ -493,9 +494,10 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
 
       for i=1,100
       do
-        local key = self.cache_id .. ":" .. keys[offset].key
+        local k = keys[offset].key
+        local key = self.cache_id .. ":" .. k
         red:hgetall(key)
-        red:ttl(key)
+        red:zscore(PK, k)
         foreachi(self.sets, function(field)
           red:smembers(key .. ":" .. field.dbfield)
         end)
@@ -515,8 +517,8 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
         local key = keys[j].key
         j = j + 1
         data = redis.get_row_result(results[i])
-        ttl = redis.get_row_result(results[i + 1])
-        ttl = ttl > 0 and ttl or nil
+        expires = redis.get_row_result(results[i + 1])
+        expires = (expires ~= ngx_null and expires ~= "inf") and expires or nil
         if #data ~= 0 then
           local object = red:array_to_hash(data)
           for k = 1,#self.sets
@@ -536,7 +538,7 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
           end)
           foreach(self:key2pk(key), function(k,v) data[k] = v end)
           callback_on_get(red, data)
-          getter(data, key, ttl)
+          getter(data, key, expires and expires - now() or nil)
         end
       end
     end
@@ -676,27 +678,29 @@ function cache_class:set_unsafe(data, o)
   local ttl = o.ttl
 
   local set = function(red)
-    local reason, old, old_ttl
+    local reason, old, old_ttl, old_expires
     local pk, key = self:make_pk(data)
+    local PK = self.cache_id .. ":keys"
 
     -- get exists data
     red:init_pipeline()
 
     red:hgetall(key)
-    red:ttl(key)
+    red:zscore(PK, key)
 
     local results = assert(red:commit_pipeline())
 
-    old, old_ttl = unpack(results)
+    old, old_expires = unpack(results)
 
     old = redis.get_row_result(old)
     if old ~= ngx_null and #old ~= 0 then
-      old_ttl = redis.get_row_result(old_ttl)
+      old_expires = redis.get_row_result(old_expires)
+      old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and old_expires - now() or nil
       if old_ttl and old_ttl < 0 then
         old_ttl = nil
       end
     else
-      old, old_ttl = nil, nil
+      old, old_expires = nil, nil
     end
 
     if old then
@@ -1018,7 +1022,10 @@ end
 -- memory index helpers --------------------------------------------------------
 
 local function add_to_index(self, pk, data, ttl)
-  for i,index in ipairs(self.memory.indexes or {})
+  local memory = self.memory
+  local dict = memory.dict
+  local idx_keys = {}
+  for i,index in ipairs(memory.indexes or {})
   do
     local idx_key = { "$i:" .. i }
     if pcall(foreachi, index, function(field)
@@ -1027,7 +1034,8 @@ local function add_to_index(self, pk, data, ttl)
       tinsert(idx_key, p ~= ngx_null and p or "null")
     end) then
       idx_key = tconcat(idx_key, ":")
-      if not self.memory.dict:object_fun(idx_key, function(idx_data, flags)
+      tinsert(idx_keys, idx_key)
+      if not dict:object_fun(idx_key, function(idx_data, flags)
         idx_data = idx_data or {}
         for j,k in ipairs(idx_data)
         do
@@ -1043,11 +1051,15 @@ local function add_to_index(self, pk, data, ttl)
 :: done ::
         return idx_data, flags
       end, ttl) then
+        -- cleanup
+        foreachi(idx_keys, function(idx_key)
+          dict:delete(idx_key)
+        end)
         return nil, "no memory"
       end
     end
   end
-  return true
+  return idx_keys
 end
 
 local function delete_from_index(self, pk)
@@ -1095,7 +1107,7 @@ end
 
 -- memory index helpers end ----------------------------------------------------
 
-function cache_class:memory_prefetch()
+local function memory_prefetch(self)
   local logid = self.log:log_id()
 
   if not self.memory.prefetch then
@@ -1135,17 +1147,6 @@ function cache_class:memory_prefetch()
   end)
 end
 
-function cache_class:memory_scan(fun)
-  foreachi(self.memory.dict:get_keys(0), function(key)
-    if not key:match("^$i:") then
-      local data = self.memory.dict:object_get(key)
-      if type(data) == "table" then
-        fun(self:key2pk(key), data)
-      end
-    end
-  end)
-end
-
 local function do_memory_update(self, n)
   local logid_old = self.memory.shm:get("logid")
   local log, err = self.log:get_events(logid_old, n)
@@ -1172,18 +1173,22 @@ local function do_memory_update(self, n)
   local start = now()
   local added, updated, deleted = 0, 0, 0
 
+  local dict = self.memory.dict
+  local prefetch = self.memory.prefetch
+
   local tab_pk = {}
   local function flush_update()
     self:get_unsafe(tab_pk, self.redis_rw, function(data, key, ttl)
       local pk = self:key2pk(key)
       local old, flags = delete_from_index(self, pk)
-      if old or self.memory.prefetch then
+      if old or prefetch then
         local nomemory
-        if self.memory.dict:object_add(key, data, ttl, flags) then
+        if dict:object_add(key, data, ttl, flags) then
           if add_to_index(self, pk, data, ttl) then
             on_set(pk, data, ttl)
             if old then updated = updated + 1 else added = added + 1 end
           else
+            dict:delete(key)
             nomemory = true
           end
         else
@@ -1214,8 +1219,8 @@ local function do_memory_update(self, n)
       end
     elseif event.ev == events.PURGE then
       tab_pk = {}
-      self.memory.dict:flush_all()
-      self.memory.dict:flush_expired()
+      dict:flush_all()
+      dict:flush_expired()
       on_purge()
     end
     self.memory.shm:set("logid", event.logid)
@@ -1230,10 +1235,10 @@ local function do_memory_update(self, n)
   return #log.events
 end
 
-function cache_class:memory_update()
+local function memory_update(self)
   repeat
     local count = do_memory_update(self, 1000)
-  until count ~= 1000 or ngx.worker.exiting()
+  until count ~= 1000 or worker_exiting()
 end
 
 local function get_memory(self, red, pk, callback)
@@ -1267,19 +1272,31 @@ local function get_memory(self, red, pk, callback)
   if not val then
     self:get_unsafe(pk, red, function(data, key, ttl)
       if not memory_ttl or memory_ttl > 0 then
+        local nomemory
         ttl = ttl and min(ttl, memory_ttl or ttl) or nil
         val, flags = dict:object_fun(key, function(_, flags)
           return data, flags
         end, ttl)
-        self:debug("get_memory()", function()
-          return "save hot: pk=", json_encode(pk), " data=", json_encode(val)
-        end)
-      else
-        val = data
+        if val then
+          if add_to_index(self, pk, val, ttl) then
+            self:debug("get_memory()", function()
+              return "save hot: pk=", json_encode(pk), " data=", json_encode(val), " ttl=", ttl
+            end)
+          else
+            dict:delete(key)
+            nomemory = true
+          end
+        else
+          nomemory = true
+        end
+        if nomemory then
+          self:warn("memory_update()", function()
+            return "please increase dictionary size"
+          end)
+        end
       end
-      if val then
-        callback(val)
-      end
+      val = data
+      callback(val)
     end)
   end
 
@@ -1289,6 +1306,27 @@ local function get_memory(self, red, pk, callback)
   end
 
   return val, flags
+end
+
+local function memory_cleanup(self)
+  local start = now()
+  local count = self.memory.dict:flush_expired()
+  if count ~= 0 then
+    self:info("memory_cleanup()", function()
+      return "count=", count, " at ", now() - start, " seconds"
+    end)
+  end
+end
+
+function cache_class:memory_scan(fun)
+  foreachi(self.memory.dict:get_keys(0), function(key)
+    if not key:match("^$i:") then
+      local data = self.memory.dict:object_get(key)
+      if type(data) == "table" then
+        fun(self:key2pk(key), data)
+      end
+    end
+  end)
 end
 
 function cache_class:get_memory_slave(pk, callback)
@@ -1703,13 +1741,18 @@ function cache_class:init()
   end
 
   local update_job = job.new("memory update " .. self.cache_name, function()
-    self:memory_update()
+    memory_update(self)
     return true
   end, 1)
 
+  job.new("memory cleanup " .. self.cache_name, function()
+    memory_cleanup(self)
+    return true
+  end, 10):run()
+
   local prefetch_job
   prefetch_job = job.new("memory prefetch " .. self.cache_name, function()
-    local ok, err = pcall(cache_class.memory_prefetch, self)
+    local ok, err = pcall(memory_prefetch, self)
     if ok then
       prefetch_job:stop()
     else
