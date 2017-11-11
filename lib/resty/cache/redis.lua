@@ -1307,7 +1307,7 @@ local function get_memory(self, red, pk, callback)
   end
 
   if not val then
-    dict:object_set(key, ngx_null, self.memory.ddos_timeout or 1)    
+    dict:object_set(key, ngx_null, self.memory.ddos_timeout or 1)
     return ngx_null
   end
 
@@ -1769,17 +1769,20 @@ function cache_class:init()
   job.new("memory cleanup " .. self.cache_name, function()
     memory_cleanup(self)
     return true
-  end, 1):run()
+  end, 60):run()
 
   if not self.memory.prefetch then
     job.new("memory hits " .. self.cache_name, function()
       local p = max(60, self.memory.ttl) / 60
-      local hits, miss = self:hits(p, p)
-      if hits + miss == 0 then
+      local hits_avg, miss_avg = self:hits(p, p)
+      local hits_1, miss_1 = self:hits(1, 1)
+      if hits_1 + miss_1 == 0 then
         return
       end
       self:info("memory_hits()", function()
-        return floor(100 * hits / (hits + miss)), "% hits=", hits, " misses=", miss
+        return "avg: ", floor(100 * hits_avg / (hits_avg + miss_avg)), "%, ",
+               "last: ", floor(100 * hits_1 / (hits_1 + miss_1)), "% ",
+               "hits=", hits_1, " misses=", miss_1
       end)
       return true
     end, 60):run()
