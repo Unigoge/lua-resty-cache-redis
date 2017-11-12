@@ -31,6 +31,59 @@ local thread_spawn, thread_wait = ngx.thread.spawn, ngx.thread.wait
 local json_encode, json_decode = cjson.encode, cjson.decode
 local safe_call = common.safe_call
 
+local events = {
+  SET    = "set",
+  UPDATE = "update",
+  DELETE = "delete",
+  PURGE  = "purge"
+}
+
+local function fake_fun(...)
+  return ...
+end
+
+-- ZLIB support for fields
+
+local zlib_loaded, zlib = pcall(require, "ffi-zlib")
+local inflate = zlib_loaded and function(input)
+  local decompressed = {}
+  local offset = 1
+  local length = #input
+  local ok, err = zlib.inflateGzip(function(sz)
+    if offset > length then
+      return
+    end
+    local chunk = input:sub(offset, min(offset + sz - 1, length))
+    offset = offset + sz
+    return chunk
+  end, function(chunk)
+    tinsert(decompressed, chunk)
+  end, 16384)
+  return tconcat(decompressed, "")
+end or fake_fun
+
+local deflate = zlib_loaded and function(input)
+  local compressed = {}
+  local offset = 1
+  local length = #input
+  local ok, err = zlib.deflateGzip(function(sz)
+    if offset > length then
+      return
+    end
+    local chunk = input:sub(offset, min(offset + sz - 1, length))
+    offset = offset + sz
+    return chunk
+  end, function(chunk)
+    tinsert(compressed, chunk)
+  end, 16384, {
+    strategy = zlib.Z_HUFFMAN_ONLY,
+    level = zlib.Z_BEST_COMPRESSION
+  })
+  return tconcat(compressed, "")
+end or fake_fun
+
+-- time helpers
+
 local function now()
   update_time()
   return ngx_now()
@@ -41,18 +94,8 @@ local function time()
   return ngx_time()
 end
 
-local function fake_fun()
-end
-
 local foreachi, foreach, find_if, find_if_i =
   common.foreachi, common.foreach, common.find_if, common.find_if_i
-
-local events = {
-  SET    = "set",
-  UPDATE = "update",
-  DELETE = "delete",
-  PURGE  = "purge"
-}
 
 -- helpers
 
@@ -316,7 +359,10 @@ local function to_db(cache, data)
           end)
         end
       elseif field.ftype == ftype.OBJECT then
-        set[dbfield] = json_encode(value)
+        local x = json_encode(value)
+        set[dbfield] = field.gzip and deflate(x) or x
+      elseif field.ftype == ftype.STR then
+        set[dbfield] = value == ngx_null and "null" or (field.gzip and deflate(value) or value)
       else
         set[dbfield] = value == ngx_null and "null" or value
       end
@@ -355,7 +401,11 @@ local function from_db(fields, data)
           end
         end
       elseif field.ftype == ftype.OBJECT then 
-        out[name] = value == "null" and ngx_null or json_decode(value)
+        out[name] = value == "null" and ngx_null or json_decode(
+          field.gzip and inflate(value) or value
+        )
+      elseif field.ftype == ftype.STR then 
+        out[name] = value == "null" and ngx_null or (field.gzip and inflate(value) or value)
       else
         out[name] = value == "null" and ngx_null or value
       end
