@@ -774,9 +774,6 @@ function cache_class:set_unsafe(data, o)
             return "index=", cjson.encode(index), " add index_key=", index_key, " id=", key_part
           end)
           red:zadd(self.cache_id .. ":" .. index_key, "+inf", key_part)
-          if ttl then
-            red:expire(index_key, ttl)
-          end
           reason = not reason.fun and { desc = "update()", fun = on_update } or reason
         end
         if obsolete or old_index_key ~= index_key then
@@ -825,7 +822,7 @@ function cache_class:set_unsafe(data, o)
         fun(key_f, value)
       end
 
-      if ttl then
+      if ttl and #self.indexes == 0 then
         red:expire(key_f, ttl)
       end
 
