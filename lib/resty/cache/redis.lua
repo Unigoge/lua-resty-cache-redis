@@ -593,14 +593,14 @@ function cache_class:search_unsafe(data, redis_xx, getter)
   redis_xx = redis_xx or self.redis_rw
 
   local search_pk = function(red, ikey)
-    return assert(self.redis:zscan(red, ikey, "*"))
+    return assert(red:smembers(ikey))
   end
 
   local pk = {}
 
   foreachi(ikeys, function(iikey)
     foreachi(self.redis:handle(search_pk, redis_xx, self.cache_id .. ":" .. iikey), function(ikey)
-      tinsert(pk, self:key2pk(ikey.key))
+      tinsert(pk, self:key2pk(ikey))
     end)
   end)
 
@@ -773,12 +773,12 @@ function cache_class:set_unsafe(data, o)
           self:debug("update_index()", function()
             return "index=", cjson.encode(index), " add index_key=", index_key, " id=", key_part
           end)
-          red:zadd(self.cache_id .. ":" .. index_key, "+inf", key_part)
+          red:sadd(self.cache_id .. ":" .. index_key, key_part)
           reason = not reason.fun and { desc = "update()", fun = on_update } or reason
         end
         if obsolete or old_index_key ~= index_key then
           -- remove obsolete data
-          red:zrem(self.cache_id .. ":" .. old_index_key, key_part)
+          red:srem(self.cache_id .. ":" .. old_index_key, key_part)
           self:debug("update_index()", function()
             return "index=", cjson.encode(index), " remove index_key=", old_index_key, " id=", key_part
           end)
@@ -967,7 +967,7 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       with_indexes(self, {}, exists, nil, function(_, index_pair)
         local index_key = unpack(index_pair)
         if index_key then
-          red:zrem(self.cache_id .. ":" .. index_key, key_part)
+          red:srem(self.cache_id .. ":" .. index_key, key_part)
         end
       end)
     end
@@ -1481,7 +1481,7 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
       if index_keys then 
         -- remove indexes
         foreachi(index_keys[1 + n], function(index_key)
-          red:zrem(self.cache_id .. ":" .. index_key, key_part)
+          red:srem(self.cache_id .. ":" .. index_key, key_part)
         end)
       end
 
