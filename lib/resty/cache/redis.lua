@@ -1242,15 +1242,27 @@ local function memory_update(self)
   until count ~= 1000 or worker_exiting()
 end
 
+local function memory_cleanup(self)
+  local start = now()
+  local count = self.memory.dict:flush_expired()
+  if count ~= 0 then
+    self:info("memory_cleanup()", function()
+      return "count=", count, " at ", now() - start, " seconds"
+    end)
+  end
+end
+
+local DDOS_FLAG = -1
+
 local function get_memory(self, red, pk, callback)
   local memory = self.memory
   if not memory then
-    return nil, "only for in-memory caches"
+    return nil, nil, "only for in-memory caches"
   end
 
   local ok, err = check_pk(self.fields, pk)
   if not ok then
-    return nil, err
+    return nil, nil, err
   end
 
   callback = callback or function() end
@@ -1307,21 +1319,32 @@ local function get_memory(self, red, pk, callback)
   end
 
   if not val then
-    dict:object_set(key, ngx_null, self.memory.ddos_timeout or 1)
-    return ngx_null
+    if red == self.redis_rw then
+      dict:object_set(key, ngx_null, self.memory.ddos_timeout or 1, DDOS_FLAG)
+      flags = DDOS_FLAG
+    end
+    val = ngx_null
   end
 
   return val, flags
 end
 
-local function memory_cleanup(self)
-  local start = now()
-  local count = self.memory.dict:flush_expired()
-  if count ~= 0 then
-    self:info("memory_cleanup()", function()
-      return "count=", count, " at ", now() - start, " seconds"
-    end)
+function cache_class:get_memory_slave(pk, callback)
+  local data, flags, err = get_memory(self, self.redis_ro, pk, callback)
+  if not data then
+    return nil, err
   end
+  if data ~= ngx_null or flags == DDOS_FLAG then
+    return data, flags
+  end
+  -- failover on master node
+  data, flags, err = get_memory(self, self.redis_rw, pk, callback)
+  return data, data and flags or err
+end
+
+function cache_class:get_memory_master(pk, callback)
+  local data, flags, err = get_memory(self, self.redis_rw, pk, callback)
+  return data, data and flags or err
 end
 
 function cache_class:hits(backward, m)
@@ -1348,14 +1371,6 @@ function cache_class:memory_scan(fun)
       end
     end
   end)
-end
-
-function cache_class:get_memory_slave(pk, callback)
-  return get_memory(self, self.redis_ro, pk, callback)
-end
-
-function cache_class:get_memory_master(pk, callback)
-  return get_memory(self, self.redis_rw, pk, callback)
 end
 
 function cache_class:get_by_index(data, o)
