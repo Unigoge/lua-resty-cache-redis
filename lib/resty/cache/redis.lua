@@ -1416,7 +1416,7 @@ function cache_class:hits(backward, m)
   for t = minute, minute + m
   do
     hits = hits + (self.memory.dict:get("$h:" .. t) or 0)
-    miss = miss + (self.memory.dict:get("$m:" .. t) or 0)  
+    miss = miss + (self.memory.dict:get("$m:" .. t) or 0)
   end
   return hits, miss
 end
@@ -1484,18 +1484,13 @@ local function pipeline(red, fun)
   return assert(red:commit_pipeline())
 end
 
-local function purge_by_chunk(self, red, index, next_keys_fn)
-  local count = 0
+local function purge_bulk(self, index, next_keys_fn, under_watching)
+  pcall(cache_desc_fixup, self)
 
   local fields_indexed = self.fields_indexed
 
-  while not worker_exiting()
-  do
+  local function purge_chunk(red, keys)
     local start = now()
-    local keys = next_keys_fn()
-    if not next(keys) then
-      break
-    end
 
     while not worker_exiting()
     do
@@ -1503,39 +1498,46 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
       local bulk = {}
 
       -- setup transaction guard
-  
-      pipeline(red, function()
-        foreach(keys, function(key_part)
-          local key =  self.cache_id .. ":" .. key_part
-          red:watch(key)
-          tinsert(bulk, {
-            key = key,
-            key_part = key_part
-          })
-        end)
+
+      local watched = {}
+
+      foreachi(keys, function(key_part)
+        local key =  self.cache_id .. ":" .. key_part
+        tinsert(bulk, {
+          key = key,
+          key_part = key_part
+        })
+        if under_watching then
+          tinsert(watched, key)
+        end
       end)
-  
-      -- check for exists in the XX:keys
-  
-      for j, expire_at in ipairs(pipeline(red, function()
-        foreachi(bulk, function(b)
-          -- get expire at
-          red:zscore(self.PK, b.key_part)
-        end)
-      end)) do
-        if redis.get_row_result(expire_at) ~= ngx_null then
-          -- added to XX:keys => skip
-          local b = bulk[j]
-          red:unwatch(b.key)
-          b.skip = true
+
+      if under_watching then
+        assert(red:watch(unpack(watched)))
+
+        -- check for exists in the XX:keys
+        -- purge job
+
+        for j, expire_at in ipairs(pipeline(red, function()
+          foreachi(bulk, function(b)
+            -- get expire at
+            red:zscore(self.PK, b.key_part)
+          end)
+        end)) do
+          if redis.get_row_result(expire_at) ~= ngx_null then
+            -- added to XX:keys => skip
+            local b = bulk[j]
+            red:unwatch(b.key)
+            b.skip = true
+          end
         end
       end
 
       -- get indexes
-  
+
       if #fields_indexed ~= 0 then
         red:init_pipeline()
-  
+
         foreachi(bulk, function(b)
           if not b.skip then
             red:hmget(b.key, unpack(fields_indexed))
@@ -1544,7 +1546,7 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
             red:ping()
           end
         end)
-  
+
         for j, row in ipairs(assert(red:commit_pipeline()))
         do
           local index_values = redis.get_row_result(row)
@@ -1556,7 +1558,7 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
           bulk[j].index_keys = index_keys_k
         end
       end
-  
+
       -- flush data
 
       local purged = 0
@@ -1574,24 +1576,24 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
 
           -- remove from XX:keys
           red:zrem(index, key_part)
-      
+
           -- remove from XX:key:N set
           foreachi(self.sets, function(field)
             red:del(key .. ":" .. field.dbfield)
           end)
-      
+
           -- remove from XX:key:N list
           foreachi(self.lists, function(field)
             red:del(key .. ":" .. field.dbfield)
           end)
-      
+
           if index_keys then 
             -- remove indexes
             foreachi(index_keys, function(index_key)
               red:srem(self.cache_id .. ":" .. index_key, key_part)
             end)
           end
-      
+
           red:del(key)
 
           purged = purged + 1
@@ -1612,18 +1614,77 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
                  self.wait.ms or 10000)
       end
 
-      self:info("purge_chunk()", function()
+      self:debug("purge_chunk()", function()
         return "count=", #bulk, " purged=", purged, " at ", now() - start, " seconds"
       end)
 
-      count = count + purged
-
-      break
+      return #bulk, purged
     end
+
+    return 0, 0
   end
 
-  return count
+  local total_count, total_purged = 0, 0
+
+  while not worker_exiting()
+  do
+    local start = now()
+    local keys = next_keys_fn()
+    if not next(keys) then
+      break
+    end
+
+    local threads = {}
+
+    local count, purged = 0, 0
+
+    local ok, err = pcall(function()
+      local function spawn_thread(chunk)
+        local thr = thread_spawn(function()
+          return self.redis:handle(function(red)
+            return purge_chunk(red, chunk)
+          end, self.redis_rw)
+        end)
+        assert(thr, "failed to create corutine")
+        return thr
+      end
+
+      local chunk = {}
+
+      foreach(keys, function(key)
+        tinsert(chunk, key)
+        if #chunk == 100 then
+          tinsert(threads, spawn_thread(chunk))
+          chunk = {}
+        end
+      end)
+
+      if #chunk ~= 0 then
+        tinsert(threads, spawn_thread(chunk))
+      end
+    end)
+
+    foreachi(threads, function(thr)
+      local r = { thread_wait(thr) }
+      if tremove(r, 1) then
+        local chunk_count, chunk_purged = unpack(r)
+        count, purged = count + chunk_count, purged + chunk_purged
+      end
+    end)
+
+    self:info("purge_bulk()", function()
+      return "count=", count, " purged=", purged, " at ", now() - start, " seconds"
+    end)
+
+    assert(ok, err)
+
+    total_count, total_purged = total_count + count, total_purged + purged
+  end
+
+  return total_count, total_purged
 end
+
+local UNDER_WATCHING = true
 
 local function purge_keys(self, red)
   local lock = self.redis:create_lock(self.cache_id, 10)
@@ -1636,27 +1697,31 @@ local function purge_keys(self, red)
 
   local start = now()
 
-  local count = 0
+  local count, purged
   local cursor = "0"
 
   -- purge XX:purge, XX:keys
 
   local ok, err = pcall(function()
-    repeat
-      local renamed, err = red:renamenx(self.PK, self.PURGE)
-      assert(renamed or err:match("no such key"), err)
+    local renamed, err = red:renamenx(self.PK, self.PURGE)
+    assert(renamed or err:match("no such key"), err)
   
-      count = count + purge_by_chunk(self, red, self.PURGE, function()
-        local keys, err
-        repeat
-          local tmp = assert(red:zscan(self.PURGE, cursor, "count", 1000, "match", "*"))
-          cursor, keys, err = unpack(tmp)
-          assert(not err, err)
-          lock:prolong()
-        until cursor == "0" or #keys ~= 0
-        return red:array_to_hash(keys)
+    if renamed == 0 then
+      self:warn("purge()", function()
+        return "continue previous purge(): you need to call purge() again after the current process will be completed"
       end)
-    until renamed == 1 or err:match("no such key")
+    end
+
+    count, purged = purge_bulk(self, self.PURGE, function()
+      local keys, err
+      repeat
+        local tmp = assert(red:zscan(self.PURGE, cursor, "count", 1000, "match", "*"))
+        cursor, keys, err = unpack(tmp)
+        assert(not err, err)
+        lock:prolong()
+      until cursor == "0" or #keys ~= 0
+      return red:array_to_hash(keys)
+    end, UNDER_WATCHING)
   
     if cursor == "0" then
       -- full
@@ -1670,7 +1735,7 @@ local function purge_keys(self, red)
 
   if count ~= 0 then
     self:info("purge()", function()
-      return "count=", count, " at ", now() - start, " seconds"
+      return "count=", count, " purged=", purged, " at ", now() - start, " seconds"
     end)
   end
 
@@ -1688,7 +1753,7 @@ local function cleanup_keys(self, red)
   local count = 0
 
   local ok, err = pcall(function()
-    count = purge_by_chunk(self, red, self.PK, function()
+    count = purge_bulk(self, self.PK, function()
       local keys = assert(red:zrangebyscore(self.PK, 0, time(), "LIMIT", 0, 1000))
       lock:prolong()
       local h = {}
