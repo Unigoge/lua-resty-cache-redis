@@ -31,6 +31,11 @@ local thread_spawn, thread_wait = ngx.thread.spawn, ngx.thread.wait
 local json_encode, json_decode = cjson.encode, cjson.decode
 local safe_call = common.safe_call
 
+local pipeline = redis.pipeline
+local transaction = redis.transaction
+local check_pipeline = redis.check_pipeline
+local get_row_result = redis.get_row_result
+
 local events = {
   SET    = "set",
   UPDATE = "update",
@@ -40,6 +45,11 @@ local events = {
 
 local function fake_fun(...)
   return ...
+end
+
+local ok, new_tab = pcall(require, "table.new")
+if not ok or type(new_tab) ~= "function" then
+  new_tab = function (narr, nrec) return {} end
 end
 
 -- ZLIB support for fields
@@ -541,46 +551,44 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
     do
       local j = offset
 
-      red:init_pipeline()
-
-      for i=1,100
-      do
-        local k = keys[offset].key
-        local key = self.cache_id .. ":" .. k
-        red:hgetall(key)
-        red:zscore(PK, k)
-        foreachi(self.sets, function(field)
-          red:smembers(key .. ":" .. field.dbfield)
-        end)
-        foreachi(self.lists, function(field)
-          red:lrange(key .. ":" .. field.dbfield, 0, -1)
-        end)
-        offset = offset + 1
-        if offset > #keys then
-          break
+      local r = pipeline(red, function()
+        for i=1,100
+        do
+          local k = keys[offset].key
+          local key = self.cache_id .. ":" .. k
+          red:hgetall(key)
+          red:zscore(PK, k)
+          foreachi(self.sets, function(field)
+            red:smembers(key .. ":" .. field.dbfield)
+          end)
+          foreachi(self.lists, function(field)
+            red:lrange(key .. ":" .. field.dbfield, 0, -1)
+          end)
+          offset = offset + 1
+          if offset > #keys then
+            break
+          end
         end
-      end
+      end)
 
-      local results = assert(red:commit_pipeline())
-
-      for i=1,#results,2 + #self.sets + #self.lists
+      for i=1,#r,2 + #self.sets + #self.lists
       do
         local key = keys[j].key
         j = j + 1
-        data = redis.get_row_result(results[i])
-        expires = redis.get_row_result(results[i + 1])
+        data = get_row_result(r[i])
+        expires = get_row_result(r[i + 1])
         if expires ~= ngx_null then
           expires = expires ~= "inf" and tonumber(expires) or nil
           if #data ~= 0 and (not expires or expires > now()) then
             local object = red:array_to_hash(data)
             for k = 1,#self.sets
             do
-              local members = assert(results[i + 1 + k])
+              local members = assert(r[i + 1 + k])
               object[self.sets[k].dbfield] = members
             end
             for k = 1,#self.lists
             do
-              local members = assert(results[i + 1 + #self.sets + k])
+              local members = assert(r[i + 1 + #self.sets + k])
               object[self.lists[k].dbfield] = members
             end
             data = from_db(self.fields, object)
@@ -678,13 +686,12 @@ local function with_indexes(self, pk, new, old, fun)
   foreachi(self.indexes, function(index)
     local index_key, old_index_key = { index.id }, { index.id }
     foreachi(index.fields, function(name)
-      tinsert(index_key, new[name] or pk[name] or "*")
-      if old then
-        tinsert(old_index_key, old[name] or pk[name] or "*")
-      end
+      tinsert(index_key, new[name] or pk[name] or old[name])
+      tinsert(old_index_key, old[name] or pk[name])
     end)
-    index_key = tconcat(index_key, ":")
-    fun(index, { index_key, old and tconcat(old_index_key, ":") or index_key }, index.obsolete)
+    index_key = #index_key == #index.fields + 1 and tconcat(index_key, ":") or ngx_null
+    old_index_key = #old_index_key == #index.fields + 1 and tconcat(old_index_key, ":") or ngx_null
+    fun(index_key, old_index_key, index)
   end)
 end
 
@@ -710,12 +717,10 @@ local function get_indexes_values(self, red, pk)
   local pk, key = self:make_pk(pk)
   local key_part = self:make_key(pk)
 
-  red:init_pipeline()
-
-  red:zscore(self.PK, key_part)
-  red:hmget(key, unpack(fields_indexed))
-
-  local expires, db = unpack(assert(red:commit_pipeline()))
+  local expires, db = unpack(pipeline(red, function()
+    red:zscore(self.PK, key_part)
+    red:hmget(key, unpack(fields_indexed))
+  end))
 
   if expires == ngx_null then
     return ngx_null
@@ -745,18 +750,16 @@ function cache_class:set_unsafe(data, o)
     local key_part = self:make_key(pk)
 
     -- get exists data
-    red:init_pipeline()
+    old, old_expires = unpack(pipeline(red, function()
+      red:hgetall(key)
+      red:zscore(self.PK, key_part)
+    end))
 
-    red:hgetall(key)
-    red:zscore(self.PK, key_part)
-
-    old, old_expires = unpack(assert(red:commit_pipeline()))
-
-    old = redis.get_row_result(old)
-    old_expires = redis.get_row_result(old_expires)
+    old = get_row_result(old)
+    old_expires = get_row_result(old_expires)
 
     if old_expires ~= ngx_null and old ~= ngx_null and #old ~= 0 then
-      old_expires = redis.get_row_result(old_expires)
+      old_expires = get_row_result(old_expires)
       old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and tonumber(old_expires) - now() or nil
       if old_ttl and old_ttl < 0 then
         -- expired
@@ -826,9 +829,8 @@ function cache_class:set_unsafe(data, o)
           return "#i=", i_crc32, "->", self.i_crc32
         end)
       end
-      with_indexes(self, pk, data, old, function(index, index_pair, obsolete)
-        local index_key, old_index_key = unpack(index_pair)
-        if not obsolete and (not old or index_key ~= old_index_key) then
+      with_indexes(self, pk, data, old or {}, function(index_key, old_index_key, index)
+        if not index.obsolete and index_key ~= ngx_null and index_key ~= old_index_key then
           -- new key or index field changed
           self:debug("update_index()", function()
             return "index=", cjson.encode(index), " add index_key=", index_key, " id=", key_part
@@ -836,13 +838,15 @@ function cache_class:set_unsafe(data, o)
           red:sadd(self.cache_id .. ":" .. index_key, key_part)
           reason = not reason.fun and { desc = "update()", fun = on_update } or reason
         end
-        if obsolete or old_index_key ~= index_key then
-          -- remove obsolete data
-          red:srem(self.cache_id .. ":" .. old_index_key, key_part)
-          self:debug("update_index()", function()
-            return "index=", cjson.encode(index), " remove index_key=", old_index_key, " id=", key_part
-          end)
-          reason = not reason.fun and { desc = "update()", fun = on_update } or reason
+        if index.obsolete or index_key == ngx_null or index_key ~= old_index_key then
+          if old_index_key ~= ngx_null then
+            -- remove obsolete exists index
+            red:srem(self.cache_id .. ":" .. old_index_key, key_part)
+            self:debug("update_index()", function()
+              return "index=", cjson.encode(index), " remove index_key=", old_index_key, " id=", key_part
+            end)
+            reason = not reason.fun and { desc = "update()", fun = on_update } or reason
+          end
         end
       end)
     end
@@ -944,9 +948,7 @@ function cache_class:set_unsafe(data, o)
                self.wait.ms or 100)
     end
 
-    local results = assert(red:commit_pipeline())
-
-    ok, err = redis.check_pipeline(results)
+    ok, err = check_pipeline(assert(red:commit_pipeline()))
     if not ok then
       self:warn(reason.desc, function()
         return err
@@ -1020,44 +1022,25 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       return ngx_null
     end
 
-    red:init_pipeline()
-
-    red:multi()
-
-    red:del(key)
-
-    if next(exists) then
-      with_indexes(self, {}, exists, nil, function(_, index_pair)
-        local index_key = unpack(index_pair)
-        if index_key then
-          red:srem(self.cache_id .. ":" .. index_key, key_part)
-        end
+    transaction(red, function()
+      red:del(key)
+  
+      if next(exists) then
+        with_indexes(self, {}, exists, {}, function(index_key)
+          if index_key ~= ngx_null then
+            red:srem(self.cache_id .. ":" .. index_key, key_part)
+          end
+        end)
+      end
+  
+      red:zrem(self.PK, key_part)
+      foreachi(self.sets, function(field)
+        red:del(key .. ":" .. field.dbfield)
       end)
-    end
-
-    red:zrem(self.PK, key_part)
-    foreachi(self.sets, function(field)
-      red:del(key .. ":" .. field.dbfield)
-    end)
-    foreachi(self.lists, function(field)
-      red:del(key .. ":" .. field.dbfield)
-    end)
-
-    red:exec()
-
-    if self.wait then
-      red:wait(self.wait.slaves or 1,
-               self.wait.ms or 100)
-    end
-
-    local results = assert(red:commit_pipeline())
-
-    local ok, err = redis.check_pipeline(results)
-    if not ok then
-      self:warn("delete_unsafe()", function()
-        return err
+      foreachi(self.lists, function(field)
+        red:del(key .. ":" .. field.dbfield)
       end)
-    end
+    end, self.wait)
 
     if skip_log then
       return true
@@ -1478,82 +1461,47 @@ function cache_class:get_by_index(data, o)
   return #items ~= 0 and items or ngx_null
 end
 
-local function pipeline(red, fun)
-  red:init_pipeline()
-  fun()
-  return assert(red:commit_pipeline())
-end
-
-local function purge_bulk(self, index, next_keys_fn, under_watching)
+local function purge_bulk(self, index, next_keys_fn, prepare_fn)
   pcall(cache_desc_fixup, self)
 
-  local fields_indexed = self.fields_indexed
+  prepare_fn = prepare_fn or function() end
 
-  local function purge_chunk(red, keys)
+  local function purge_chunk(red, bulk)
     local start = now()
 
-    while not worker_exiting()
+    for j, key_part in ipairs(bulk)
     do
-:: again ::
-      local bulk = {}
+      bulk[j] = {
+        key = self.cache_id .. ":" .. key_part,
+        key_part = key_part
+      }
+    end
 
-      -- setup transaction guard
+    local purged
 
-      local watched = {}
+    repeat
+      prepare_fn(red, bulk)
 
-      foreachi(keys, function(key_part)
-        local key =  self.cache_id .. ":" .. key_part
-        tinsert(bulk, {
-          key = key,
-          key_part = key_part
-        })
-        if under_watching then
-          tinsert(watched, key)
-        end
-      end)
-
-      if under_watching then
-        assert(red:watch(unpack(watched)))
-
-        -- check for exists in the XX:keys
-        -- purge job
-
-        for j, expire_at in ipairs(pipeline(red, function()
+      if #self.fields_indexed ~= 0 and not bulk[1].index_keys then
+        local r = pipeline(red, function()
           foreachi(bulk, function(b)
-            -- get expire at
-            red:zscore(self.PK, b.key_part)
+            if not b.skip then
+              red:hmget(b.key, unpack(self.fields_indexed))
+            else
+              -- skip this key (replaced)
+              red:ping()
+            end
           end)
-        end)) do
-          if redis.get_row_result(expire_at) ~= ngx_null then
-            -- added to XX:keys => skip
-            local b = bulk[j]
-            red:unwatch(b.key)
-            b.skip = true
-          end
-        end
-      end
-
-      -- get indexes
-
-      if #fields_indexed ~= 0 then
-        red:init_pipeline()
-
-        foreachi(bulk, function(b)
-          if not b.skip then
-            red:hmget(b.key, unpack(fields_indexed))
-          else
-            -- fictive command
-            red:ping()
-          end
         end)
 
-        for j, row in ipairs(assert(red:commit_pipeline()))
+        for j, row in ipairs(r)
         do
-          local index_values = redis.get_row_result(row)
+          local index_values = get_row_result(row)
           local index_keys_k = {}
-          with_indexes(self, {}, decode_indexes(self, index_values), nil, function(_, index_pair)
-            local index_key = unpack(index_pair)
-            tinsert(index_keys_k, index_key)
+          with_indexes(self, {}, decode_indexes(self, index_values), {}, function(index_key)
+            if index_key ~= ngx_null then
+              tinsert(index_keys_k, index_key)
+            end
           end)
           bulk[j].index_keys = index_keys_k
         end
@@ -1561,18 +1509,15 @@ local function purge_bulk(self, index, next_keys_fn, under_watching)
 
       -- flush data
 
-      local purged = 0
+      purged = 0
 
-      assert(red:multi())
-
-      local r = pipeline(red, function()
+      if transaction(red, function()
         foreachi(bulk, function(b)
           if b.skip then
             return
           end
 
           local key, key_part = b.key, b.key_part
-          local index_keys = b.index_keys
 
           -- remove from XX:keys
           red:zrem(index, key_part)
@@ -1587,41 +1532,30 @@ local function purge_bulk(self, index, next_keys_fn, under_watching)
             red:del(key .. ":" .. field.dbfield)
           end)
 
-          if index_keys then 
-            -- remove indexes
-            foreachi(index_keys, function(index_key)
-              red:srem(self.cache_id .. ":" .. index_key, key_part)
-            end)
-          end
+          -- remove indexes
+          foreachi(b.index_keys or {}, function(index_key)
+            red:srem(self.cache_id .. ":" .. index_key, key_part)
+          end)
 
           red:del(key)
 
           purged = purged + 1
         end)
-      end)
-
-      -- check exec status
-      if assert(red:exec()) == ngx_null then
+      end, self.wait) == ngx_null then
         -- transaction fails
         self:warn("purge_chunk()", function()
           return "some of the keys have been changed while purging, try again ..."
         end)
-        goto again
+        purged = nil
       end
 
-      if self.wait then
-        red:wait(self.wait.slaves or 1,
-                 self.wait.ms or 10000)
-      end
+    until purged ~= nil
 
-      self:debug("purge_chunk()", function()
-        return "count=", #bulk, " purged=", purged, " at ", now() - start, " seconds"
-      end)
+    self:debug("purge_chunk()", function()
+      return "count=", #bulk, " purged=", purged, " at ", now() - start, " seconds"
+    end)
 
-      return #bulk, purged
-    end
-
-    return 0, 0
+    return #bulk, purged
   end
 
   local total_count, total_purged = 0, 0
@@ -1684,7 +1618,32 @@ local function purge_bulk(self, index, next_keys_fn, under_watching)
   return total_count, total_purged
 end
 
-local UNDER_WATCHING = true
+local function watch(self, red, bulk)
+  local watched = new_tab(#bulk, 0)
+
+  foreachi(bulk, function(e)
+    tinsert(watched, e.key)
+  end)
+
+  assert(red:watch(unpack(watched)))
+
+  -- check for exists in the XX:keys
+
+  for j, expire_at in ipairs(pipeline(red, function()
+    foreachi(bulk, function(b)
+      -- get expire at
+      red:zscore(self.PK, b.key_part)
+      b.skip = nil
+    end)
+  end)) do
+    if get_row_result(expire_at) ~= ngx_null then
+      -- now added to XX:keys => skip
+      local b = bulk[j]
+      red:unwatch(b.key)
+      b.skip = true
+    end
+  end
+end
 
 local function purge_keys(self, red)
   local lock = self.redis:create_lock(self.cache_id, 10)
@@ -1721,7 +1680,10 @@ local function purge_keys(self, red)
         lock:prolong()
       until cursor == "0" or #keys ~= 0
       return red:array_to_hash(keys)
-    end, UNDER_WATCHING)
+    end, function(red, bulk)
+      -- setup watchers (prepare transaction)
+      return watch(self, red, bulk)
+    end)
   
     if cursor == "0" then
       -- full

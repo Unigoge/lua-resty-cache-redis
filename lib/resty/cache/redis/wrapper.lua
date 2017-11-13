@@ -6,7 +6,7 @@ local redis = require "resty.redis"
 local job = require "job"
 local common = require "resty.cache.common"
 
-local tinsert = table.insert
+local tremove, tinsert = table.remove, table.insert
 local unpack, assert, type, xpcall = unpack, assert, type, xpcall
 local pairs, ipairs, next = pairs, ipairs, next
 local traceback = debug.traceback
@@ -294,6 +294,8 @@ local function get_row_result(row)
   return row
 end
 
+_M.get_row_result = get_row_result
+
 function _M.check_pipeline(result)
   return xpcall(foreachi, function(err)
     ngx_log(ERR, traceback())
@@ -303,8 +305,32 @@ function _M.check_pipeline(result)
   end)
 end
 
-----------------------------------------------
+function _M.pipeline(red, fun, wait)
+  red:init_pipeline()
+  fun()
+  if wait then
+    red:wait(wait.slaves or 1,
+             wait.ms or 100)
+  end
+  local r = assert(red:commit_pipeline())
+  if wait then
+    -- remove wait result
+    tremove(r, #r)
+  end
+  return r
+end
 
-_M.get_row_result = get_row_result
+function _M.transaction(red, fun, wait)
+  red:init_pipeline()
+  red:multi()
+  fun()
+  red:exec()
+  if wait then
+    red:wait(wait.slaves or 1,
+             wait.ms or 100)
+  end
+  local r = assert(red:commit_pipeline())
+  return get_row_result(r[wait and #r - 1 or #r])
+end
 
 return _M
