@@ -1226,7 +1226,7 @@ local function do_memory_update(self, n)
       local old, flags = delete_from_index(self, pk)
       if old or prefetch then
         local nomemory
-        if dict:object_add(key, data, ttl, flags) then
+        if dict:object_safe_set(key, data, ttl, flags) then
           if add_to_index(self, pk, data, ttl) then
             on_set(pk, data, ttl)
             if old then updated = updated + 1 else added = added + 1 end
@@ -1320,7 +1320,7 @@ local function get_memory(self, red, pk, callback)
       return val, flags
     end) } or { dict:object_get(key) })
     self:debug("get_memory()", function()
-      return "lookup hot: pk=", json_encode(pk), " data=", val and json_encode(val) or "NOT_FOUND"
+      return "lookup hot: pk=", json_encode(pk), " data=", (val and val ~= ngx_null) and json_encode(val) or "NOT_FOUND"
     end)
   end
 
@@ -1362,7 +1362,7 @@ local function get_memory(self, red, pk, callback)
 
   if not val then
     if red == self.redis_rw then
-      dict:object_set(key, ngx_null, self.memory.ddos_timeout or 1, DDOS_FLAG)
+      dict:object_safe_set(key, ngx_null, self.memory.ddos_timeout or 1, DDOS_FLAG)
       flags = DDOS_FLAG
     end
     val = ngx_null
