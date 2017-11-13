@@ -1600,7 +1600,7 @@ local function purge_by_chunk(self, red, index, next_keys_fn)
 
       -- check exec status
       if assert(red:exec()) == ngx_null then
-        -- transaction fails (one of keys has been changed)
+        -- transaction fails
         self:warn("purge_chunk()", function()
           return "some of the keys have been changed while purging, try again ..."
         end)
@@ -1685,15 +1685,21 @@ local function cleanup_keys(self, red)
 
   local start = now()
 
-  local count = purge_by_chunk(self, red, self.PK, function()
-    local keys = assert(red:zrangebyscore(self.PK, 0, time(), "LIMIT", 0, 1000))
-    lock:prolong()
-    local h = {}
-    foreachi(keys, function(k) h[k] = true end)
-    return h
+  local count = 0
+
+  local ok, err = pcall(function()
+    count = purge_by_chunk(self, red, self.PK, function()
+      local keys = assert(red:zrangebyscore(self.PK, 0, time(), "LIMIT", 0, 1000))
+      lock:prolong()
+      local h = {}
+      foreachi(keys, function(k) h[k] = true end)
+      return h
+    end)
   end)
 
   lock:release()
+
+  assert(ok, err)
 
   if count ~= 0 then
     self:info("cleanup()", function()
