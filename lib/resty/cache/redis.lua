@@ -496,7 +496,7 @@ end
 
 function cache_class:keys(redis_xx)
   local keys = function(red)
-    local keys = assert(self.redis:zscan(red, self.cache_id .. ":keys", "*"))
+    local keys = assert(self.redis:zscan(red, self.PK, "*"))
     local h = {}
     foreachi(keys, function(v) h[tostring(v.key)] = true end)
     return h, #keys
@@ -524,7 +524,7 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
     local key = self:make_key(pk)
     -- if type(key) is a table we have a multikey operation 
     local keys = type(key) == "table" and key or { { key = key } }
-    local PK = self.cache_id .. ":keys"
+    local PK = self.PK
 
     if type(key) ~= "table" then
       if key:match("[%?%*%[]") then
@@ -731,13 +731,12 @@ function cache_class:set_unsafe(data, o)
   local set = function(red)
     local reason, old, old_ttl, old_expires
     local pk, key = self:make_pk(data)
-    local PK = self.cache_id .. ":keys"
 
     -- get exists data
     red:init_pipeline()
 
     red:hgetall(key)
-    red:zscore(PK, key)
+    red:zscore(self.PK, key)
 
     local results = assert(red:commit_pipeline())
 
@@ -914,13 +913,13 @@ function cache_class:set_unsafe(data, o)
     if not old then
       -- update primary index and ttl
       if ttl then
-        red:zadd(self.cache_id .. ":keys", time() + ttl, key_part)
+        red:zadd(self.PK, time() + ttl, key_part)
         -- DO NOT setup ttl - need for remove indexes
         if #self.indexes == 0 then
           red:expire(key, ttl)
         end
       else
-        red:zadd(self.cache_id .. ":keys", "+inf", key_part)
+        red:zadd(self.PK, "+inf", key_part)
       end
     end
 
@@ -1023,7 +1022,7 @@ function cache_class:delete_unsafe(pk, data, skip_log)
     end
 
     local key_part = self:make_key(pk)
-    red:zrem(self.cache_id .. ":keys", key_part)
+    red:zrem(self.PK, key_part)
     foreachi(self.sets, function(field)
       red:del(key .. ":" .. field.dbfield)
     end)
@@ -1576,7 +1575,7 @@ local function purge_keys(self, red)
   local cursor = "0"
 
   repeat
-    local renamed, err = red:renamenx(self.cache_id .. ":keys", old)
+    local renamed, err = red:renamenx(self.PK, old)
     assert(renamed or err:match("no such key"), err)
     count = count + purge_by_chunk(self, red, old, function()
       local keys, err
@@ -1614,10 +1613,8 @@ local function cleanup_keys(self, red)
 
   local start = now()
 
-  local index = self.cache_id .. ":keys"
-
-  local count = purge_by_chunk(self, red, index, function()
-    local keys = assert(red:zrangebyscore(index, 0, time(), "LIMIT", 0, 1000))
+  local count = purge_by_chunk(self, red, self.PK, function()
+    local keys = assert(red:zrangebyscore(self.PK, 0, time(), "LIMIT", 0, 1000))
     lock:prolong()
     local h = {}
     foreachi(keys, function(k) h[k] = true end)
@@ -1947,6 +1944,8 @@ function _M.new(opts, redis_opts)
 
   setpartof(opts.sets)
   setpartof(opts.lists)
+
+  opts.PK = opts.cache_id .. ":keys"
 
   local CONFIG = ngx.shared.config
 
