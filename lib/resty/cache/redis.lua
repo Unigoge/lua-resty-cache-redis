@@ -598,7 +598,7 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
             end)
             foreach(self:key2pk(key), function(k,v) data[k] = v end)
             callback_on_get(red, data)
-            getter(data, key, expires and expires - now() or nil)
+            getter(data, key, expires and expires - time() or nil)
           end
         end
       end
@@ -760,7 +760,7 @@ function cache_class:set_unsafe(data, o)
 
     if old_expires ~= ngx_null and old ~= ngx_null and #old ~= 0 then
       old_expires = get_row_result(old_expires)
-      old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and tonumber(old_expires) - now() or nil
+      old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and tonumber(old_expires) - time() or nil
       if old_ttl and old_ttl < 0 then
         -- expired
         old, old_ttl = nil, nil
@@ -803,7 +803,7 @@ function cache_class:set_unsafe(data, o)
       check_simple_types_out(self.fields, old)
       local eq = equals(old, data)
       update_data = (overwrite and not eq) or not eq or not compare(old, data)
-      reason = update_data and { desc = overwrite and "overwrite()" or "update()", fun = on_update } or { desc = "nothing()" }
+      reason = update_data and { desc = overwrite and "overwrite()" or "update()", fun = overwrite and on_new or on_update } or { desc = "nothing()" }
       self:debug("set()", function()
         return "overwrite_data=", overwrite and "Y" or "N", " update_data=", update_data and "Y" or "N",
                " old=", json_encode(old), " new=", json_encode(data)
@@ -969,7 +969,7 @@ function cache_class:set_unsafe(data, o)
     end
 
     if ok then
-      reason.fun()
+      reason.fun(pk, data, ttl)
       err = nil
     end
 
@@ -1226,7 +1226,9 @@ local function do_memory_update(self, n)
       local old, flags = delete_from_index(self, pk)
       if old or prefetch then
         local nomemory
-        if dict:object_safe_set(key, data, ttl, flags) then
+        local saved = prefetch and dict:object_safe_set(key, data, ttl, flags)
+                                or dict:object_set(key, data, ttl, flags)
+        if saved then
           if add_to_index(self, pk, data, ttl) then
             on_set(pk, data, ttl)
             if old then updated = updated + 1 else added = added + 1 end
@@ -1332,28 +1334,7 @@ local function get_memory(self, red, pk, callback)
     dict:incr("$m:" .. minute, 1, 0)
     self:get_unsafe(pk, red, function(data, key, ttl)
       if not memory_ttl or memory_ttl > 0 then
-        local nomemory
-        ttl = ttl and min(ttl, memory_ttl or ttl) or nil
-        val, flags = dict:object_fun(key, function(_, flags)
-          return data, flags
-        end, ttl)
-        if val then
-          if add_to_index(self, pk, val, ttl) then
-            self:debug("get_memory()", function()
-              return "save hot: pk=", json_encode(pk), " data=", json_encode(val), " ttl=", ttl
-            end)
-          else
-            dict:delete(key)
-            nomemory = true
-          end
-        else
-          nomemory = true
-        end
-        if nomemory then
-          self:warn("memory_update()", function()
-            return "please increase dictionary size"
-          end)
-        end
+        self:save_hot(pk, data, ttl)
       end
       val = data
       callback(val)
@@ -1369,6 +1350,33 @@ local function get_memory(self, red, pk, callback)
   end
 
   return val, flags
+end
+
+function cache_class:save_hot(pk, data, ttl)
+  local memory = self.memory
+  local dict = memory.dict
+  local key = self:make_key(pk)
+  ttl = ttl and min(ttl, memory.ttl or ttl) or nil
+  local nomemory
+  if dict:object_fun(key, function(_, flags)
+    return data, flags
+  end, ttl) then
+    if add_to_index(self, pk, data, ttl) then
+      self:debug("save_hot()", function()
+        return "pk=", json_encode(pk), " data=", json_encode(data), " ttl=", ttl
+      end)
+    else
+      dict:delete(key)
+      nomemory = true
+    end
+  else
+    nomemory = true
+  end
+  if nomemory then
+    self:warn("save_hot()", function()
+      return "please increase dictionary size"
+    end)
+  end
 end
 
 function cache_class:get_memory_slave(pk, callback)
