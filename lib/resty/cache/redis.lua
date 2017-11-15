@@ -1320,7 +1320,7 @@ local function memory_cleanup(self)
   end
 end
 
-local DDOS_FLAG = 0xFFFFFFFF
+local DDOS_FLAG = (0xFFFFFFFF - 1) / 2
 
 local function save_hot(self, pk, key, data, ttl, callback)
   local memory = self.memory
@@ -1402,7 +1402,7 @@ local function get_memory(self, red, pk, callback_fn)
 
   if not val then
     if red == self.redis_rw then
-      dict:object_safe_set(key, ngx_null, self.memory.ddos_timeout or 1, DDOS_FLAG)
+      dict:object_safe_set(key, ngx_null, memory.ddos_timeout or 1, DDOS_FLAG)
       flags = DDOS_FLAG
     end
     val = ngx_null
