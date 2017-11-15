@@ -1296,9 +1296,9 @@ local function memory_cleanup(self)
   end
 end
 
-local DDOS_FLAG = -1
+local DDOS_FLAG = 0xFFFFFFFF
 
-local function get_memory(self, red, pk, callback)
+local function get_memory(self, red, pk, callback_fn)
   local memory = self.memory
   if not memory then
     return nil, nil, "only for in-memory caches"
@@ -1309,18 +1309,25 @@ local function get_memory(self, red, pk, callback)
     return nil, nil, err
   end
 
-  callback = callback or function() end
+  local callback = function(val, flags)
+    local nval, nflags = callback_fn(val, flags)
+    return nval or val, nflags or flags
+  end
 
-  local key, val, flags
   local memory_ttl = memory.ttl
   local dict = memory.dict
+  local key = self:make_key(pk)
+  local val, flags
 
   if not memory_ttl or memory_ttl > 0 then
-    key = self:make_key(pk)
-    val, flags = unpack(callback and { dict:object_fun(key, function(val, flags)
-      callback(val, flags)
-      return val, flags
-    end) } or { dict:object_get(key) })
+    val, flags = unpack(
+      callback_fn and { dict:object_fun(key, function(val, flags)
+                          return unpack(
+                            val and { callback(val, flags) } or { nil, 0 }
+                          )
+                        end) }
+                   or { dict:object_get(key) }
+    )
     self:debug("get_memory()", function()
       return "lookup hot: pk=", json_encode(pk), " data=", (val and val ~= ngx_null) and json_encode(val) or "NOT_FOUND"
     end)
@@ -1333,11 +1340,10 @@ local function get_memory(self, red, pk, callback)
   else
     dict:incr("$m:" .. minute, 1, 0)
     self:get_unsafe(pk, red, function(data, key, ttl)
-      if not memory_ttl or memory_ttl > 0 then
-        self:save_hot(pk, data, ttl)
-      end
-      val = data
-      callback(val)
+      val, flags = unpack(
+        (not memory_ttl or memory_ttl > 0) and { self:save_hot(pk, data, ttl, callback_fn and callback or nil) }
+                                            or ( callback_fn and { callback(data, 0) } or { data, 0 } )
+      )
     end)
   end
 
@@ -1352,15 +1358,19 @@ local function get_memory(self, red, pk, callback)
   return val, flags
 end
 
-function cache_class:save_hot(pk, data, ttl)
+function cache_class:save_hot(pk, data, ttl, callback)
   local memory = self.memory
   local dict = memory.dict
   local key = self:make_key(pk)
-  ttl = ttl and min(ttl, memory.ttl or ttl) or nil
   local nomemory
-  if dict:object_fun(key, function(_, flags)
-    return data, flags
-  end, ttl) then
+  ttl = ttl and min(ttl, memory.ttl or ttl) or nil
+  local val, flags = dict:object_fun(key, function(_, flags)
+    return unpack(
+      callback and { callback(data, flags) }
+                or { data, flags }
+    )
+  end, ttl)
+  if val then
     if add_to_index(self, pk, data, ttl) then
       self:debug("save_hot()", function()
         return "pk=", json_encode(pk), " data=", json_encode(data), " ttl=", ttl
@@ -1370,6 +1380,7 @@ function cache_class:save_hot(pk, data, ttl)
       nomemory = true
     end
   else
+    val, flags = data, 0
     nomemory = true
   end
   if nomemory then
@@ -1377,6 +1388,7 @@ function cache_class:save_hot(pk, data, ttl)
       return "please increase dictionary size"
     end)
   end
+  return val, flags
 end
 
 function cache_class:get_memory_slave(pk, callback)
