@@ -1322,6 +1322,35 @@ end
 
 local DDOS_FLAG = 0xFFFFFFFF
 
+local function save_hot(self, pk, key, data, ttl, callback)
+  local memory = self.memory
+  local dict = memory.dict
+
+  ttl = ttl and min(ttl, memory.ttl or ttl) or nil
+
+  local val, flags = dict:object_fun(key, function(_, flags)
+    return unpack(
+      callback and { callback(data, flags) }
+                or { data, flags }
+    )
+  end, ttl)
+
+  if val and add_to_index(self, pk, data, ttl) then
+    self:debug("save_hot()", function()
+      return "pk=", json_encode(pk), " data=", json_encode(data), " ttl=", ttl
+    end)
+    return val, flags
+  end
+
+  dict:delete(key)
+
+  self:warn("save_hot()", function()
+    return "please increase dictionary size"
+  end)
+
+  return data, 0
+end
+
 local function get_memory(self, red, pk, callback_fn)
   local memory = self.memory
   if not memory then
@@ -1365,7 +1394,7 @@ local function get_memory(self, red, pk, callback_fn)
     dict:incr("$m:" .. minute, 1, 0)
     self:get_unsafe(pk, red, function(data, key, ttl)
       val, flags = unpack(
-        (not memory_ttl or memory_ttl > 0) and { self:save_hot(pk, data, ttl, callback_fn and callback or nil) }
+        (not memory_ttl or memory_ttl > 0) and { save_hot(self, pk, key, data, ttl, callback_fn and callback or nil) }
                                             or ( callback_fn and { callback(data, 0) } or { data, 0 } )
       )
     end)
@@ -1379,39 +1408,6 @@ local function get_memory(self, red, pk, callback_fn)
     val = ngx_null
   end
 
-  return val, flags
-end
-
-function cache_class:save_hot(pk, data, ttl, callback)
-  local memory = self.memory
-  local dict = memory.dict
-  local key = self:make_key(pk)
-  local nomemory
-  ttl = ttl and min(ttl, memory.ttl or ttl) or nil
-  local val, flags = dict:object_fun(key, function(_, flags)
-    return unpack(
-      callback and { callback(data, flags) }
-                or { data, flags }
-    )
-  end, ttl)
-  if val then
-    if add_to_index(self, pk, data, ttl) then
-      self:debug("save_hot()", function()
-        return "pk=", json_encode(pk), " data=", json_encode(data), " ttl=", ttl
-      end)
-    else
-      dict:delete(key)
-      nomemory = true
-    end
-  else
-    val, flags = data, 0
-    nomemory = true
-  end
-  if nomemory then
-    self:warn("save_hot()", function()
-      return "please increase dictionary size"
-    end)
-  end
   return val, flags
 end
 
