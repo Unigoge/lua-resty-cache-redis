@@ -515,6 +515,30 @@ function cache_class:keys(redis_xx)
   return self.redis:handle(keys, redis_xx or self.redis_rw)
 end
 
+function cache_class:exists_unsafe(pk, redis_xx)
+  if not pk then
+    return nil, "bad args: pk required"
+  end
+
+  local ok, err = check_pk(self.fields, pk)
+  if not ok then
+    return nil, err
+  end
+
+  pcall(cache_desc_fixup, self)
+
+  local exists = function(red)
+    local key_part = self:make_key(pk)
+    return assert(red:zscore(self.PK, key_part)) ~= ngx_null
+  end
+
+  return self.redis:handle(exists, redis_xx or self.redis_rw)
+end
+
+function cache_class:exists(pk)
+  return safe_call(self.exists_unsafe, self, pk, self.redis_ro)
+end
+
 function cache_class:get_unsafe(pk, redis_xx, getter)
   if not pk then
     return nil, "bad args: pk required"
@@ -1407,6 +1431,15 @@ end
 function cache_class:get_memory_master(pk, callback)
   local data, flags, err = get_memory(self, self.redis_rw, pk, callback)
   return data, data and flags or err
+end
+
+function cache_class:memory_exists(pk)
+  local exists
+  self:get_memory_slave(pk, function(val, flags)
+    exists = val
+    return val, flags
+  end)
+  return exists and exists ~= ngx_null 
 end
 
 function cache_class:hits(backward, m)
