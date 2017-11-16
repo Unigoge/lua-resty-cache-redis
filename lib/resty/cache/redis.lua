@@ -1034,7 +1034,7 @@ function cache_class:set(data, o)
   return safe_call(self.set_unsafe, self, data, o)
 end
 
-function cache_class:incr_unsafe(data)
+function cache_class:incr_unsafe(data, o)
   if not data then
     return nil, "bad args: pk required"
   end
@@ -1076,9 +1076,11 @@ function cache_class:incr_unsafe(data)
      }
   })
 
-  return self:set_unsafe(update_data, {
-    upsert = true
-  })
+  o = o or {
+    update = true
+  }
+
+  return self:set_unsafe(update_data, o)
 end
 
 function cache_class:incr(pk, fname, incr_by)
