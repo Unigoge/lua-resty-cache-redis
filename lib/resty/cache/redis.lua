@@ -29,6 +29,7 @@ local worker_exiting = ngx.worker.exiting
 local DEBUG, INFO, WARN, ERR = ngx.DEBUG, ngx.INFO, ngx.WARN, ngx.ERR
 local thread_spawn, thread_wait = ngx.thread.spawn, ngx.thread.wait
 local json_encode, json_decode = cjson.encode, cjson.decode
+local loadstring = loadstring
 local safe_call = common.safe_call
 
 local pipeline = redis.pipeline
@@ -215,11 +216,20 @@ local function cache_desc_fixup(cache)
 
     cache.i_crc32 = tostring(crc32(json_encode(cache.indexes)))
 
-    return assert(red:hmset(cache_key, { fields   = json_encode(cache.fields),
-                                         indexes  = json_encode(cache.indexes),
-                                         ttl      = cache.ttl,
-                                         cache_id = cache.cache_id,
-                                         i_crc32  = cache.i_crc32 }))
+    assert(red:hmset(cache_key, { fields   = json_encode(cache.fields),
+                                  indexes  = json_encode(cache.indexes),
+                                  ttl      = cache.ttl,
+                                  cache_id = cache.cache_id,
+                                  i_crc32  = cache.i_crc32 }))
+
+    foreachi(cache.fields, function(field)
+      local default = field.default
+      assert(type(default) ~= "function", "default can't de a function type")
+      if default then
+        field.default = (type(default) == "string" and default:match("^return")) and assert(loadstring(default))
+                                                                                  or function() return default end
+      end
+    end)
   end
 
   return system:handle(update)
@@ -298,6 +308,8 @@ local function check_in(cache, data, update)
         if field.indexed then
           return nil, "bad args: indexed field can't be nil"
         end
+      elseif type(value) == "table" and value.type and value.action then
+        -- skip
       elseif field.ftype == ftype.NUM then
         data[name] = check_number(value)
       elseif field.ftype == ftype.STR then
@@ -330,13 +342,13 @@ local function defaults(fields, data)
     local name = field.name
     local value, default = data[name], field.default
     if not value and default then
-      data[name] = default
+      data[name] = default()
     end
   end)
 end
 
 local function to_db(cache, data)
-  local set, del = { ["#i"] = cache.i_crc32 }, {}
+  local set, funcs, del = { ["#i"] = cache.i_crc32 }, {}, {}
   local fields = cache.fields
 
   for i=1,#fields
@@ -348,6 +360,8 @@ local function to_db(cache, data)
       if value == "nil" then
         -- special value for remove field
         tinsert(del, { dbfield, field.ftype == ftype.SET or field.ftype == ftype.LIST } )
+      elseif type(value) == "table" and value.type and value.action then
+        funcs[name] = value
       elseif field.ftype == ftype.SET or field.ftype == ftype.LIST then
         local object
         if not value then
@@ -379,7 +393,7 @@ local function to_db(cache, data)
     end
   end
 
-  return set, del
+  return set, funcs, del
 end
 
 local function from_db(fields, data)
@@ -794,7 +808,7 @@ function cache_class:set_unsafe(data, o)
     end
 
     if old then
-      if not o.overwrite and not o.update then
+      if not o.overwrite and not o.update and not o.upsert then
         return ngx_null, ngx_null
       end
     else
@@ -820,6 +834,10 @@ function cache_class:set_unsafe(data, o)
     local on_nothing = o.on_nothing or fake_fun
     local on_update  = o.on_update  or fake_fun
 
+    red:init_pipeline()
+
+    red:multi()
+
     if old then
       old = red:array_to_hash(old)
       i_crc32 = old["#i"]
@@ -840,10 +858,6 @@ function cache_class:set_unsafe(data, o)
     end
 
     ttl = old_ttl or ttl or self.ttl
-
-    red:init_pipeline()
-
-    red:multi()
 
     -- update indexes
 
@@ -875,7 +889,7 @@ function cache_class:set_unsafe(data, o)
       end)
     end
 
-    local db_data_set, db_data_del = to_db(self, data)
+    local db_data_set, db_funcs, db_data_del = to_db(self, data)
 
     if overwrite then
       -- overwrite key data if any
@@ -890,6 +904,10 @@ function cache_class:set_unsafe(data, o)
           red:del(key .. ":" .. dbfield)
         end
         red:hdel(key, dbfield)
+      end)
+      -- funcs
+      foreach(db_funcs, function(fname, v)
+        v:callback(red, key)
       end)
     end
 
@@ -979,7 +997,7 @@ function cache_class:set_unsafe(data, o)
       end)
     end
 
-    if ok and not o.skip_log then
+    if ok and not o.skip_log and self.memory then
       local log_data
       if self.log_data then
         log_data = {}
@@ -1014,6 +1032,57 @@ end
 
 function cache_class:set(data, o)
   return safe_call(self.set_unsafe, self, data, o)
+end
+
+function cache_class:incr_unsafe(data)
+  if not data then
+    return nil, "bad args: pk required"
+  end
+
+  local ok, err = check_pk(self.fields, data)
+  if not ok then
+    return nil, err
+  end
+
+  local fname, incr_by = data.field, data.incr_by or 1
+  if not fname then
+    return nil, "bad args: field name required"
+  end
+
+  local field = self.fields_by_name[fname]
+
+  if not field then
+    return nil, "bad args: " .. field .. " is not found"
+  end
+
+  if field.ftype ~= ftype.NUM then
+    return nil, "bad args: " .. field .. " type is not a number"
+  end
+
+  pcall(cache_desc_fixup, self)
+
+  if field.indexed then
+    return nil, "bad args: " .. field .. " is indexed and can't be INCR"
+  end
+
+  local update_data = self:make_pk(data)
+  update_data[fname] = setmetatable({
+    type = "function()",
+    action = "HINCRBY(" .. incr_by .. ")"
+  }, { __index = {
+       callback = function(self, red, key)
+         red:hincrby(key, field.dbfield, incr_by)
+       end
+     }
+  })
+
+  return self:set_unsafe(update_data, {
+    upsert = true
+  })
+end
+
+function cache_class:incr(pk, fname, incr_by)
+  return safe_call(self.incr_unsafe, self, pk, fname, incr_by)
 end
 
 function cache_class:delete_unsafe(pk, data, skip_log)
@@ -1070,7 +1139,9 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       return true
     end
 
-    self:log_event(events.DELETE, pk)
+    if self.memory then
+      self:log_event(events.DELETE, pk)
+    end
 
     return true
   end
@@ -1792,7 +1863,9 @@ function cache_class:purge(max_wait)
   local function purge()
     return self.redis:handle(function(red)
       red:del("L:" .. self.cache_name .. ":last_modified")
-      self:log_event(events.PURGE)
+      if self.memory then
+        self:log_event(events.PURGE)
+      end
       return purge_keys(self, red)
     end, self.redis_rw)
   end
@@ -1971,6 +2044,10 @@ function cache_class:init()
     end, 10):run()
   end
 
+  if not self.memory then
+    return
+  end
+
   local update_job = job.new("memory update " .. self.cache_name, function()
     memory_update(self)
     return true
@@ -2020,6 +2097,8 @@ function cache_class:init()
 end
 
 function cache_class:desc()
+  pcall(cache_desc_fixup)
+
   local get_cache_desc = function(red)
     local cache_desc = assert(red:hgetall("cache:" .. self.cache_name))
     if cache_desc == ngx_null then
@@ -2065,6 +2144,8 @@ function _M.new(opts, redis_opts)
     end)
   end
 
+  opts.fields_by_name = {}
+
   foreachi(opts.fields, function(field)
     field.name = field.name:lower()
     if field.ftype == ftype.SET then
@@ -2076,6 +2157,7 @@ function _M.new(opts, redis_opts)
     if field.skip then
       field.nostore = true
     end
+    opts.fields_by_name[field.name] = field
   end)
 
   local function setpartof(t)
