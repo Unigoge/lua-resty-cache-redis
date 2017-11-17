@@ -2032,7 +2032,7 @@ end
 function cache_class:init()
   cache_desc_fixup(self)
 
-  if self.ttl then
+  if self.ttl and not self.cleanup_off then
     job.new("cleanup " .. self.cache_name, function()
       self.redis:handle(function(red)
         local ok, err = pcall(cleanup_keys, self, red)
@@ -2196,6 +2196,8 @@ function _M.new(opts, redis_opts)
   if opts.ttl then
     opts.ttl = opts.ttl * 60
   end
+
+  opts.cleanup_off = CONFIG:get(scope .. ".caches." .. opts.cache_name .. ".cleanup_off")
 
   local cache = assert(setmetatable(opts, { __index = cache_class }))
 
