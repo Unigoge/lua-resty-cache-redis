@@ -12,7 +12,7 @@ local system = require "resty.cache.redis.system"
 -- import types
 local ftype = common.ftype
 
-local tinsert, tconcat, tremove, tsort = table.insert, table.concat, table.remove, table.sort
+local tconcat, tinsert, tremove, tsort = common.concat, table.insert, table.remove, table.sort
 local tostring, tonumber = tostring, tonumber
 local pairs, ipairs, next = pairs, ipairs, next
 local assert, type, unpack, pcall = assert, type, unpack, pcall
@@ -44,13 +44,13 @@ local events = {
   PURGE  = "purge"
 }
 
-local function fake_fun(...)
-  return ...
-end
-
 local ok, new_tab = pcall(require, "table.new")
 if not ok or type(new_tab) ~= "function" then
   new_tab = function (narr, nrec) return {} end
+end
+
+local function fake_fun(...)
+  return ...
 end
 
 -- ZLIB support for fields

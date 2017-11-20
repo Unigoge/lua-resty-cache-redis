@@ -15,9 +15,27 @@ local ipairs, pairs = ipairs, pairs
 local xpcall = xpcall
 local type = type
 local traceback = debug.traceback
+local tostring = tostring
 
 local ngx_log = ngx.log
 local ERR = ngx.ERR
+
+local ok, new_tab = pcall(require, "table.new")
+if not ok or type(new_tab) ~= "function" then
+  new_tab = function (narr, nrec) return {} end
+end
+
+local tconcat = table.concat
+function _M.concat(t, sep)
+  local out = new_tab(#t, 0)
+
+  for j, v in ipairs(t)
+  do
+    out[j] = type(v) == "string" and v or tostring(v)
+  end
+
+  return tconcat(out, sep)
+end
 
 function _M.safe_call(f, ...)
   local ok, res, err = xpcall(f, function(err)

@@ -3,10 +3,11 @@ local _M = {
 }
 
 local cjson = require "cjson"
+local common = require "resty.cache.common"
 
 local assert, type, tonumber = assert, type, tonumber
 local pairs, ipairs = pairs, ipairs
-local tinsert, tconcat = table.insert, table.concat
+local tinsert, tconcat = table.insert, common.concat
 local min = math.min
 local ngx_null = ngx.null
 local json_encode = cjson.encode
