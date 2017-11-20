@@ -3,12 +3,14 @@ local _M = {
 }
 
 local ftype = {
-  NUM = 1,
-  STR = 2,
-  BOOL = 3,
-  OBJECT = 4,
-  SET = 5,
-  LIST = 6
+  NUM    = 1,
+  INT64  = 2,
+  UINT64 = 3,
+  STR    = 4,
+  BOOL   = 5,
+  OBJECT = 6,
+  SET    = 7,
+  LIST   = 8
 }
 
 local ipairs, pairs = ipairs, pairs

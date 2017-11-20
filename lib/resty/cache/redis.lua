@@ -53,6 +53,14 @@ if not ok or type(new_tab) ~= "function" then
   new_tab = function (narr, nrec) return {} end
 end
 
+-- int64 suport
+
+local int64_loaded, int64 = pcall(require, "int64")
+if not int64_loaded then
+  error(int64)
+  int64 = nil
+end
+
 -- ZLIB support for fields
 
 local zlib_loaded, zlib = pcall(require, "ffi-zlib")
@@ -115,6 +123,22 @@ local function check_number(n)
     return n
   end
   local out = tonumber(n)
+  return tostring(out) == n and out or n
+end
+
+local function check_int64(n)
+  if type(n) == "userdata" then
+    return n
+  end
+  local out = int64.signed(n)
+  return tostring(out) == n and out or n
+end
+
+local function check_uint64(n)
+  if type(n) == "userdata" then
+    return n
+  end
+  local out = int64.unsigned(n)
   return tostring(out) == n and out or n
 end
 
@@ -271,6 +295,10 @@ local function check_simple_types_out(fields, data)
         data[name] = nil
       elseif field.ftype == ftype.NUM then
         data[name] = check_number(value)
+      elseif field.ftype == ftype.INT64 then
+        data[name] = check_int64(value)
+      elseif field.ftype == ftype.UINT64 then
+        data[name] = check_uint64(value)
       elseif field.ftype == ftype.STR then
         data[name] = tostring(value)
       elseif field.ftype == ftype.BOOL then
@@ -312,6 +340,10 @@ local function check_in(cache, data, update)
         -- skip
       elseif field.ftype == ftype.NUM then
         data[name] = check_number(value)
+      elseif field.ftype == ftype.INT64 then
+        data[name] = check_int64(value)
+      elseif field.ftype == ftype.UINT64 then
+        data[name] = check_uint64(value)
       elseif field.ftype == ftype.STR then
         data[name] = tostring(value)
       elseif field.ftype == ftype.BOOL then
@@ -430,6 +462,10 @@ local function from_db(fields, data)
         )
       elseif field.ftype == ftype.STR then 
         out[name] = value == "null" and ngx_null or (field.gzip and inflate(value) or value)
+      elseif field.ftype == ftype.INT64 then
+        out[name] = value == "null" and ngx_null or int64.signed(value)
+      elseif field.ftype == ftype.UINT64 then
+        out[name] = value == "null" and ngx_null or int64.unsigned(value)
       else
         out[name] = value == "null" and ngx_null or value
       end
@@ -2149,6 +2185,9 @@ function _M.new(opts, redis_opts)
   opts.fields_by_name = {}
 
   foreachi(opts.fields, function(field)
+    if field.ftype == ftype.INT64 or field.ftype == ftype.UINT64 then
+      assert(int64, "Int64 unsupported")
+    end
     field.name = field.name:lower()
     if field.ftype == ftype.SET then
       tinsert(opts.sets, field)
