@@ -161,7 +161,7 @@ local function request(self, opts)
     if opts.no_decode then
       resp.data = resp.body
     else
-      ok, resp.data = pcall(json_decode, resp.body, { number_as_string = true })
+      ok, resp.data = pcall(json_decode, resp.body)
       if not ok then
         resp.data = nil
         err = err or "INVALID_JSON_BODY"

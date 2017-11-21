@@ -55,8 +55,14 @@ end
 
 -- int64 suport
 
+local Int64
+local UInt64
+
 local int64_loaded, int64 = pcall(require, "int64")
-if not int64_loaded then
+if int64_loaded then
+  Int64 = int64.signed
+  UInt64 = int64.unsigned
+else
   error(int64)
   int64 = nil
 end
@@ -119,27 +125,10 @@ local foreachi, foreach, find_if, find_if_i =
 -- helpers
 
 local function check_number(n)
-  if type(n) == "number" then
-    return n
-  end
-  local out = tonumber(n)
-  return tostring(out) == n and out or n
-end
-
-local function check_int64(n)
-  if type(n) == "userdata" then
-    return n
-  end
-  local out = int64.signed(n)
-  return tostring(out) == n and out or n
-end
-
-local function check_uint64(n)
-  if type(n) == "userdata" then
-    return n
-  end
-  local out = int64.unsigned(n)
-  return tostring(out) == n and out or n
+  local tp = type(n)
+  return tp == "number" and number or (
+    tp == "userdata" and n:tonumber() or tonumber(n)
+  )
 end
 
 local function check_boolean(v)
@@ -296,9 +285,9 @@ local function check_simple_types_out(fields, data)
       elseif field.ftype == ftype.NUM then
         data[name] = check_number(value)
       elseif field.ftype == ftype.INT64 then
-        data[name] = check_int64(value)
+        data[name] = Int64(value)
       elseif field.ftype == ftype.UINT64 then
-        data[name] = check_uint64(value)
+        data[name] = UInt64(value)
       elseif field.ftype == ftype.STR then
         data[name] = tostring(value)
       elseif field.ftype == ftype.BOOL then
@@ -341,9 +330,9 @@ local function check_in(cache, data, update)
       elseif field.ftype == ftype.NUM then
         data[name] = check_number(value)
       elseif field.ftype == ftype.INT64 then
-        data[name] = check_int64(value)
+        data[name] = Int64(value)
       elseif field.ftype == ftype.UINT64 then
-        data[name] = check_uint64(value)
+        data[name] = UInt64(value)
       elseif field.ftype == ftype.STR then
         data[name] = tostring(value)
       elseif field.ftype == ftype.BOOL then
@@ -463,9 +452,9 @@ local function from_db(fields, data)
       elseif field.ftype == ftype.STR then 
         out[name] = value == "null" and ngx_null or (field.gzip and inflate(value) or value)
       elseif field.ftype == ftype.INT64 then
-        out[name] = value == "null" and ngx_null or int64.signed(value)
+        out[name] = value == "null" and ngx_null or Int64(value)
       elseif field.ftype == ftype.UINT64 then
-        out[name] = value == "null" and ngx_null or int64.unsigned(value)
+        out[name] = value == "null" and ngx_null or UInt64(value)
       else
         out[name] = value == "null" and ngx_null or value
       end
