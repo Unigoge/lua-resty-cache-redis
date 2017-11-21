@@ -459,17 +459,17 @@ local function from_db(fields, data)
           end
         end
       elseif field.ftype == ftype.OBJECT then 
-        out[name] = value == "null" and ngx_null or json_decode(
+        out[name] = (value == ngx_null or value == "null") and ngx_null or json_decode(
           field.gzip and inflate(value) or value
         )
       elseif field.ftype == ftype.STR then 
-        out[name] = value == "null" and ngx_null or (field.gzip and inflate(value) or value)
+        out[name] = (value == ngx_null or value == "null") and ngx_null or (field.gzip and inflate(value) or value)
       elseif field.ftype == ftype.INT64 then
-        out[name] = value == "null" and ngx_null or Int64(value)
+        out[name] = (value == ngx_null or value == "null") and ngx_null or Int64(value)
       elseif field.ftype == ftype.UINT64 then
-        out[name] = value == "null" and ngx_null or UInt64(value)
+        out[name] = (value == ngx_null or value == "null") and ngx_null or UInt64(value)
       else
-        out[name] = value == "null" and ngx_null or value
+        out[name] = (value == ngx_null or value == "null") and ngx_null or value
       end
     end
   end
