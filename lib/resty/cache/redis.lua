@@ -388,28 +388,42 @@ local function to_db(cache, data)
         if not value then
           -- composing from source fields
           object = {}
-          foreachi(type(field.source) == "table" and field.source or { field.source }, function(source)
-            object[#object + 1] = data[source] and (data[source] ~= ngx_null and data[source] or "null") or "nil"
+          local source_fields = type(field.source) == "table" and field.source or { field.source }
+          foreachi(source_fields, function(source)
+            local val = data[source]
+            if val then
+              object[#object + 1] = val ~= ngx_null and val or "null"
+            end
           end)
-          set[dbfield] = tconcat(object, "|")
+          if #object == #source_fields then
+            set[dbfield] = tconcat(object, "|")
+          end
         else
           -- get from value
           set[dbfield] = {}
           foreachi(type(value) == "table" and value or { value }, function(v)
             object = {}
-            foreachi(type(field.source) == "table" and field.source or { field.source }, function(source)
-              object[#object + 1] = v[source] and (v[source] ~= ngx_null and v[source] or "null") or "nil"
+            local source_fields = type(field.source) == "table" and field.source or { field.source }
+            foreachi(source_fields, function(source)
+              local val = v[source]
+              if val then
+                object[#object + 1] = val ~= ngx_null and val or "null"
+              end
             end)
-            tinsert(set[dbfield], tconcat(object, "|"))
+            if #object == #source_fields then
+              tinsert(set[dbfield], tconcat(object, "|"))
+            end
           end)
         end
-      elseif field.ftype == ftype.OBJECT then
-        local x = json_encode(value)
-        set[dbfield] = field.gzip and deflate(x) or x
-      elseif field.ftype == ftype.STR then
-        set[dbfield] = value == ngx_null and "null" or (field.gzip and deflate(value) or value)
-      else
-        set[dbfield] = value == ngx_null and "null" or value
+      elseif value then
+        if field.ftype == ftype.OBJECT then
+          local x = json_encode(value)
+          set[dbfield] = field.gzip and deflate(x) or x
+        elseif field.ftype == ftype.STR then
+          set[dbfield] = value == ngx_null and "null" or (field.gzip and deflate(value) or value)
+        else
+          set[dbfield] = value == ngx_null and "null" or value
+        end
       end
     end
   end
