@@ -63,7 +63,6 @@ if int64_loaded then
   Int64 = int64.signed
   UInt64 = int64.unsigned
 else
-  error(int64)
   int64 = nil
 end
 
