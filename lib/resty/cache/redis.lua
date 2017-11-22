@@ -1867,7 +1867,7 @@ end
 local function cleanup_keys(self, red)
   local lock = self.redis:create_lock(self.cache_id, 10)
   if not lock:aquire() then
-    return nil, "can't aquire the lock"
+    return nil, "locked"
   end
 
   local start = now()
@@ -1895,6 +1895,71 @@ local function cleanup_keys(self, red)
   end
 
   return true
+end
+
+function cache_class:gc()
+  pcall(cache_desc_fixup, self)
+
+  local function gc(red)
+    local lock = self.redis:create_lock(self.cache_id .. ":gc", 60)
+    if not lock:aquire() then
+      return nil, "locked"
+    end
+
+    local start = now()
+
+    local count = 0
+    local cursor = "0"
+    local indexes
+    local err
+
+    repeat
+      cursor, indexes, err = unpack(assert(red:scan(cursor, "count", 100, "match", self.cache_id .. ":*:*")))
+      assert(not err, err)
+      self.redis:handle(function(red)
+        foreachi(indexes, function(index)
+          count = count + assert(red:zremrangebyscore(index, 0, time() - 60))
+        end)
+      end, self.redis_rw)
+      lock:prolong()
+    until count >= 10000 or cursor == "0"
+
+    lock:release()
+
+    if count ~= 0 then
+      self:info("gc()", function()
+        return "end, count=", count, " at ", now() - start, " seconds"
+      end)
+    end
+
+    return true
+  end
+
+  local gc_job
+  gc_job = job.new("gc " .. self.cache_name, function()
+    local ok, ret, err = pcall(function()
+      return self.redis:handle(function(red)
+        return gc(red)
+      end, self.redis_ro)
+    end)
+    if ok and ret then
+      gc_job:stop()
+      gc_job:clean()
+    elseif err ~= "locked" then
+      self:err("gc()", function()
+        return err or ret
+      end)
+    end
+    return true
+  end, 0.1)
+
+  if gc_job:running() then
+    return nil, "already in progress"
+  end
+
+  gc_job:run()
+
+  return "async"
 end
 
 function cache_class:purge(max_wait)
@@ -2074,7 +2139,7 @@ function cache_class:init()
     job.new("cleanup " .. self.cache_name, function()
       self.redis:handle(function(red)
         local ok, err = pcall(cleanup_keys, self, red)
-        if not ok then
+        if not ok and err ~= "locked" then
           self:err("cleanup_keys()", function()
             return err
           end)
