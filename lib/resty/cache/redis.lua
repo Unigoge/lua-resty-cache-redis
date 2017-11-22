@@ -731,7 +731,7 @@ function cache_class:search_unsafe(data, redis_xx, getter)
   redis_xx = redis_xx or self.redis_rw
 
   local search_pk = function(red, ikey)
-    return assert(red:smembers(ikey))
+    return assert(red:zrangebyscore(ikey, time(), "+inf"))
   end
 
   local pk = {}
@@ -909,13 +909,13 @@ function cache_class:set_unsafe(data, o)
           self:debug("update_index()", function()
             return "index=", cjson.encode(index), " add index_key=", index_key, " id=", key_part
           end)
-          red:sadd(self.cache_id .. ":" .. index_key, key_part)
+          red:zadd(self.cache_id .. ":" .. index_key, ttl and (time() + ttl) or "+inf", key_part)
           reason = not reason.fun and { desc = "update()", fun = on_update } or reason
         end
         if index.obsolete or index_key == ngx_null or index_key ~= old_index_key then
           if old_index_key ~= ngx_null then
             -- remove obsolete exists index
-            red:srem(self.cache_id .. ":" .. old_index_key, key_part)
+            red:zrem(self.cache_id .. ":" .. old_index_key, key_part)
             self:debug("update_index()", function()
               return "index=", cjson.encode(index), " remove index_key=", old_index_key, " id=", key_part
             end)
@@ -1159,7 +1159,7 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       if next(exists) then
         with_indexes(self, {}, exists, {}, function(index_key)
           if index_key ~= ngx_null then
-            red:srem(self.cache_id .. ":" .. index_key, key_part)
+            red:zrem(self.cache_id .. ":" .. index_key, key_part)
           end
         end)
       end
@@ -1694,7 +1694,7 @@ local function purge_bulk(self, index, next_keys_fn, prepare_fn)
 
           -- remove indexes
           foreachi(b.index_keys or {}, function(index_key)
-            red:srem(self.cache_id .. ":" .. index_key, key_part)
+            red:zrem(self.cache_id .. ":" .. index_key, key_part)
           end)
 
           red:del(key)
