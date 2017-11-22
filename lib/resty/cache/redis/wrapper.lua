@@ -312,12 +312,16 @@ function _M.pipeline(red, fun, wait)
     red:wait(wait.slaves or 1,
              wait.ms or 100)
   end
-  local r = assert(red:commit_pipeline())
+  local resp = assert(red:commit_pipeline())
   if wait then
     -- remove wait result
-    tremove(r, #r)
+    tremove(resp, #resp)
   end
-  return r
+  for j,row in ipairs(resp)
+  do
+    resp[j] = get_row_result(row)
+  end
+  return resp
 end
 
 function _M.transaction(red, fun, wait)
@@ -329,8 +333,8 @@ function _M.transaction(red, fun, wait)
     red:wait(wait.slaves or 1,
              wait.ms or 100)
   end
-  local r = assert(red:commit_pipeline())
-  return get_row_result(r[wait and #r - 1 or #r])
+  local resp = assert(red:commit_pipeline())
+  return get_row_result(resp[wait and #resp - 1 or #resp])
 end
 
 return _M

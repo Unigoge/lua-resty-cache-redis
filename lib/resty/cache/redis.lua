@@ -35,7 +35,6 @@ local safe_call = common.safe_call
 local pipeline = redis.pipeline
 local transaction = redis.transaction
 local check_pipeline = redis.check_pipeline
-local get_row_result = redis.get_row_result
 
 local events = {
   SET    = "set",
@@ -459,17 +458,17 @@ local function from_db(fields, data)
           end
         end
       elseif field.ftype == ftype.OBJECT then 
-        out[name] = (value == ngx_null or value == "null") and ngx_null or json_decode(
+        out[name] = value == "null" and ngx_null or json_decode(
           field.gzip and inflate(value) or value
         )
       elseif field.ftype == ftype.STR then 
-        out[name] = (value == ngx_null or value == "null") and ngx_null or (field.gzip and inflate(value) or value)
+        out[name] = value == "null" and ngx_null or (field.gzip and inflate(value) or value)
       elseif field.ftype == ftype.INT64 then
-        out[name] = (value == ngx_null or value == "null") and ngx_null or Int64(value)
+        out[name] = value == "null" and ngx_null or Int64(value)
       elseif field.ftype == ftype.UINT64 then
-        out[name] = (value == ngx_null or value == "null") and ngx_null or UInt64(value)
+        out[name] = value == "null" and ngx_null or UInt64(value)
       else
-        out[name] = (value == ngx_null or value == "null") and ngx_null or value
+        out[name] = value == "null" and ngx_null or value
       end
     end
   end
@@ -581,7 +580,11 @@ function cache_class:exists_unsafe(pk, redis_xx)
 
   local exists = function(red)
     local key_part = self:make_key(pk)
-    return assert(red:zscore(self.PK, key_part)) ~= ngx_null
+    local pk_exists, key_exists = unpack(pipeline(red, function()
+      red:zscore(self.PK, key_part)
+      red:exists(self.cache_id .. ":" .. key_part)
+    end))
+    return pk_exists ~= ngx_null and key_exists == 1
   end
 
   return self.redis:handle(exists, redis_xx or self.redis_rw)
@@ -651,8 +654,7 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
       do
         local key = keys[j].key
         j = j + 1
-        data = get_row_result(r[i])
-        expires = get_row_result(r[i + 1])
+        data, expires = r[i], r[i + 1]
         if expires ~= ngx_null then
           expires = expires ~= "inf" and tonumber(expires) or nil
           if #data ~= 0 and (not expires or expires > now()) then
@@ -831,11 +833,7 @@ function cache_class:set_unsafe(data, o)
       red:zscore(self.PK, key_part)
     end))
 
-    old = get_row_result(old)
-    old_expires = get_row_result(old_expires)
-
     if old_expires ~= ngx_null and old ~= ngx_null and #old ~= 0 then
-      old_expires = get_row_result(old_expires)
       old_ttl = (old_expires ~= ngx_null and old_expires ~= "inf") and tonumber(old_expires) - time() or nil
       if old_ttl and old_ttl < 0 then
         -- expired
@@ -1654,15 +1652,17 @@ local function purge_bulk(self, index, next_keys_fn, prepare_fn)
           end)
         end)
 
-        for j, row in ipairs(r)
+        for j, index_values in ipairs(r)
         do
-          local index_values = get_row_result(row)
           local index_keys_k = {}
-          with_indexes(self, {}, decode_indexes(self, index_values), {}, function(index_key)
-            if index_key ~= ngx_null then
-              tinsert(index_keys_k, index_key)
-            end
-          end)
+          if type(index_values) == "table" and index_values[1] ~= ngx_null then
+            -- found
+            with_indexes(self, {}, decode_indexes(self, index_values), {}, function(index_key)
+              if index_key ~= ngx_null then
+                tinsert(index_keys_k, index_key)
+              end
+            end)
+          end
           bulk[j].index_keys = index_keys_k
         end
       end
@@ -1796,7 +1796,7 @@ local function watch(self, red, bulk)
       b.skip = nil
     end)
   end)) do
-    if get_row_result(expire_at) ~= ngx_null then
+    if expire_at ~= ngx_null then
       -- now added to XX:keys => skip
       local b = bulk[j]
       red:unwatch(b.key)
