@@ -1974,6 +1974,8 @@ function cache_class:gc()
     return nil, "already in progress"
   end
 
+  gc_job:run()
+
   return "async"
 end
 
