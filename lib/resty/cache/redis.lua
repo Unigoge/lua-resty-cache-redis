@@ -823,6 +823,8 @@ function cache_class:set_unsafe(data, o)
   o = o or {}
   local ttl = o.ttl
 
+  o.wait = o.wait or self.wait
+
   local set = function(red)
     local reason, old, old_ttl, old_expires
     local pk, key = self:make_pk(data)
@@ -1022,9 +1024,9 @@ function cache_class:set_unsafe(data, o)
 
     red:exec()
 
-    if self.wait then
-      red:wait(self.wait.slaves or 1,
-               self.wait.ms or 100)
+    if o.wait then
+      red:wait(o.wait.slaves or 1,
+               o.wait.ms or 100)
     end
 
     ok, err = check_pipeline(assert(red:commit_pipeline()))
