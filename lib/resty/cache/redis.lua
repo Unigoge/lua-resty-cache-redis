@@ -1900,13 +1900,14 @@ end
 function cache_class:gc()
   pcall(cache_desc_fixup, self)
 
+function cache_class:gc()
+  pcall(cache_desc_fixup, self)
+
   local function gc(red)
-    local lock = self.redis:create_lock(self.cache_id .. ":gc", 60)
+    local lock = self.redis:create_lock(self.cache_id .. ":gc", 10)
     if not lock:aquire() then
       return nil, "locked"
     end
-
-    local start = now()
 
     local count = 0
     local cursor = "0"
@@ -1914,25 +1915,40 @@ function cache_class:gc()
     local err
 
     repeat
-      cursor, indexes, err = unpack(assert(red:scan(cursor, "count", 100, "match", self.cache_id .. ":*:*")))
-      assert(not err, err)
-      self.redis:handle(function(red)
-        foreachi(indexes, function(index)
-          count = count + assert(red:zremrangebyscore(index, 0, time() - 60))
+      local part = 0
+      local start = now()
+      repeat
+        cursor, indexes, err = unpack(assert(red:scan(cursor, "count", 100, "match", self.cache_id .. ":*:*")))
+        assert(not err, err)
+        self.redis:handle(function(red)
+          local resp = pipeline(red, function()
+            foreachi(indexes, function(index)
+              red:zremrangebyscore(index, 0, time() - 60)
+            end)
+          end)
+          foreachi(resp, function(n)
+            part = part + n
+          end)
+        end, self.redis_rw)
+        lock:prolong()
+      until part >= 10000 or cursor == "0"
+      if part ~= 0 then
+        self:info("gc_part()", function()
+          return "end, count=", part, " at ", now() - start, " seconds"
         end)
-      end, self.redis_rw)
-      lock:prolong()
-    until count >= 10000 or cursor == "0"
+      end
+      count = count + part
+    until cursor == "0"
 
     lock:release()
 
     if count ~= 0 then
       self:info("gc()", function()
-        return "end, count=", count, " at ", now() - start, " seconds"
+        return "end, count=", count
       end)
     end
 
-    return true
+    return count
   end
 
   local gc_job
@@ -1942,9 +1958,11 @@ function cache_class:gc()
         return gc(red)
       end, self.redis_ro)
     end)
-    if ok and ret then
-      gc_job:stop()
-      gc_job:clean()
+    if ok then
+      if ret == 0 then
+        gc_job:stop()
+        gc_job:clean()
+      end
     elseif err ~= "locked" then
       self:err("gc()", function()
         return err or ret
@@ -1956,8 +1974,6 @@ function cache_class:gc()
   if gc_job:running() then
     return nil, "already in progress"
   end
-
-  gc_job:run()
 
   return "async"
 end

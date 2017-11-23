@@ -307,7 +307,7 @@ end
 
 function _M.pipeline(red, fun, wait)
   red:init_pipeline()
-  fun()
+  fun(red)
   if wait then
     red:wait(wait.slaves or 1,
              wait.ms or 100)
@@ -327,7 +327,7 @@ end
 function _M.transaction(red, fun, wait)
   red:init_pipeline()
   red:multi()
-  fun()
+  fun(red)
   red:exec()
   if wait then
     red:wait(wait.slaves or 1,
