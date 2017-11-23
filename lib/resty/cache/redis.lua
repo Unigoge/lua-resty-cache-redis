@@ -293,6 +293,7 @@ local function check_simple_types_out(fields, data)
       end
     end
   end)
+  return data
 end
 
 local function check_in(cache, data, update)
@@ -674,7 +675,7 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
             self:debug("get()", function()
               return "pk=", json_encode(self:key2pk(key)), " data=", json_encode(data) 
             end)
-            foreach(self:key2pk(key), function(k,v) data[k] = v end)
+            foreach(check_simple_types_out(self.fields, self:key2pk(key)), function(k,v) data[k] = v end)
             callback_on_get(red, data)
             getter(data, key, expires and expires - time() or nil)
           end
@@ -1896,9 +1897,6 @@ local function cleanup_keys(self, red)
 
   return true
 end
-
-function cache_class:gc()
-  pcall(cache_desc_fixup, self)
 
 function cache_class:gc()
   pcall(cache_desc_fixup, self)
