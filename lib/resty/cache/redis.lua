@@ -1115,15 +1115,14 @@ function cache_class:incr_unsafe(data, o)
      }
   })
 
-  o = o or {
-    update = true
-  }
+  o = o or {}
+  o.update = true
 
   return self:set_unsafe(update_data, o)
 end
 
-function cache_class:incr(pk, fname, incr_by)
-  return safe_call(self.incr_unsafe, self, pk, fname, incr_by)
+function cache_class:incr(data, o)
+  return safe_call(self.incr_unsafe, self, data, o)
 end
 
 function cache_class:delete_unsafe(pk, data, skip_log)
