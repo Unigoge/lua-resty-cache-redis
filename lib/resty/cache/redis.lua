@@ -948,6 +948,8 @@ function cache_class:set_unsafe(data, o)
       foreach(db_funcs, function(fname, v)
         v:callback(red, key)
       end)
+      -- redefine skip_log
+      o.skip_log = o.skip_log or o.skip_log_set
     end
 
     -- update sets & lists
