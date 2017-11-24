@@ -1036,7 +1036,7 @@ function cache_class:set_unsafe(data, o)
       end)
     end
 
-    if ok and not o.skip_log and self.memory then
+    if ok and not o.skip_log then
       local log_data
       if self.log_data then
         log_data = {}
@@ -1179,9 +1179,7 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       return true
     end
 
-    if self.memory then
-      self:log_event(events.DELETE, pk)
-    end
+    self:log_event(events.DELETE, pk)
 
     return true
   end
@@ -1902,14 +1900,15 @@ end
 function cache_class:gc()
   pcall(cache_desc_fixup, self)
 
+  local cursor = "0"
+  local count = 0
+
   local function gc(red)
     local lock = self.redis:create_lock(self.cache_id .. ":gc", 10)
     if not lock:aquire() then
-      return nil, "locked"
+      return
     end
 
-    local count = 0
-    local cursor = "0"
     local indexes
     local err
 
@@ -1952,21 +1951,38 @@ function cache_class:gc()
 
   local gc_job
   gc_job = job.new("gc " .. self.cache_name, function()
-    local ok, ret, err = pcall(function()
+    local ok, ret = pcall(function()
       return self.redis:handle(function(red)
         return gc(red)
       end, self.redis_ro)
     end)
+
     if ok then
-      if ret == 0 then
+      if not ret then
+        -- locked
+        self:err("gc()", function()
+          return "can't aquire the lock ..."
+        end)
+      elseif cursor == "0" then
+        -- completed
         gc_job:stop()
         gc_job:clean()
       end
-    elseif err ~= "locked" then
-      self:err("gc()", function()
-        return err or ret
-      end)
+      return true
     end
+
+    if ret:match("invalid cursor") then
+      -- repeat all
+      cursor = "0"
+      return true
+    end
+
+    -- other error
+
+    self:err("gc()", function()
+      return err or ret
+    end)
+
     return true
   end, 0.1)
 
@@ -1985,9 +2001,7 @@ function cache_class:purge(max_wait)
   local function purge()
     return self.redis:handle(function(red)
       red:del("L:" .. self.cache_name .. ":last_modified")
-      if self.memory then
-        self:log_event(events.PURGE)
-      end
+      self:log_event(events.PURGE)
       return purge_keys(self, red)
     end, self.redis_rw)
   end
