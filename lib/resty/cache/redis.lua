@@ -36,6 +36,11 @@ local pipeline = redis.pipeline
 local transaction = redis.transaction
 local check_pipeline = redis.check_pipeline
 
+local SEP = "\x1d"
+local function escape_sep(s)
+  return s:gsub(SEP, ":")
+end
+
 local events = {
   SET    = "set",
   UPDATE = "update",
@@ -520,18 +525,18 @@ function cache_class:make_pk(data)
       end
     end)
     if not is_multi then
-      return pk, tconcat(key, ":")
+      return pk, tconcat(key, SEP)
     end
-    tinsert(result, { pk, tconcat(key, ":") })
+    tinsert(result, { pk, tconcat(key, SEP) })
   end
   return result
 end
 
 function cache_class:key2pk(key)
   local fields = self.fields
-  local pk = key:match("^" .. self.cache_id) and key:match("^" .. self.cache_id .. ":(.+)$") or key
+  local pk = key:match("^" .. self.cache_id) and key:match("^" .. self.cache_id .. SEP .. "(.+)$") or key
   local t, i = {}, 1
-  for v in pk:gmatch("([^:]+)")
+  for v in pk:gmatch("([^" .. SEP .. "]+)")
   do
     while i <= #fields and not fields[i].pk do i = i + 1 end
     assert(i <= #fields, "invalid key")
@@ -542,7 +547,7 @@ function cache_class:key2pk(key)
 end
 
 function cache_class:make_key(data)
-  local pattern = "^" .. self.cache_id .. ":(.+)$"
+  local pattern = "^" .. self.cache_id .. SEP .. "(.+)$"
   local tab, key = self:make_pk(data)
   if key then
     -- single key operation
@@ -583,7 +588,7 @@ function cache_class:exists_unsafe(pk, redis_xx)
     local key_part = self:make_key(pk)
     local pk_exists, key_exists = unpack(pipeline(red, function()
       red:zscore(self.PK, key_part)
-      red:exists(self.cache_id .. ":" .. key_part)
+      red:exists(self.cache_id .. SEP .. key_part)
     end))
     return pk_exists ~= ngx_null and key_exists == 1
   end
@@ -635,14 +640,14 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
         for i=1,100
         do
           local k = keys[offset].key
-          local key = self.cache_id .. ":" .. k
+          local key = self.cache_id .. SEP .. k
           red:hgetall(key)
           red:zscore(PK, k)
           foreachi(self.sets, function(field)
-            red:smembers(key .. ":" .. field.dbfield)
+            red:smembers(key .. SEP .. field.dbfield)
           end)
           foreachi(self.lists, function(field)
-            red:lrange(key .. ":" .. field.dbfield, 0, -1)
+            red:lrange(key .. SEP .. field.dbfield, 0, -1)
           end)
           offset = offset + 1
           if offset > #keys then
@@ -711,7 +716,7 @@ local function index_keys(self, data)
     end)
     if #index_key - 1 == #index.fields then
       -- found
-      tinsert(index_keys, tconcat(index_key, ":"))
+      tinsert(index_keys, tconcat(index_key, SEP))
     end
   end)
   return #index_keys ~= 0 and index_keys or nil
@@ -738,7 +743,7 @@ function cache_class:search_unsafe(data, redis_xx, getter)
   local pk = {}
 
   foreachi(ikeys, function(iikey)
-    foreachi(self.redis:handle(search_pk, redis_xx, self.cache_id .. ":" .. iikey), function(ikey)
+    foreachi(self.redis:handle(search_pk, redis_xx, self.cache_id .. SEP .. iikey), function(ikey)
       tinsert(pk, self:key2pk(ikey))
     end)
   end)
@@ -768,8 +773,8 @@ local function with_indexes(self, pk, new, old, fun)
       tinsert(index_key, new[name] or pk[name] or old[name])
       tinsert(old_index_key, old[name] or pk[name])
     end)
-    index_key = #index_key == #index.fields + 1 and tconcat(index_key, ":") or ngx_null
-    old_index_key = #old_index_key == #index.fields + 1 and tconcat(old_index_key, ":") or ngx_null
+    index_key = #index_key == #index.fields + 1 and tconcat(index_key, SEP) or ngx_null
+    old_index_key = #old_index_key == #index.fields + 1 and tconcat(old_index_key, SEP) or ngx_null
     fun(index_key, old_index_key, index)
   end)
 end
@@ -910,17 +915,17 @@ function cache_class:set_unsafe(data, o)
         if not index.obsolete and index_key ~= ngx_null and index_key ~= old_index_key then
           -- new key or index field changed
           self:debug("update_index()", function()
-            return "index=", cjson.encode(index), " add index_key=", index_key, " id=", key_part
+            return "index=", cjson.encode(index), " add index_key=", escape_sep(index_key), " id=", escape_sep(key_part)
           end)
-          red:zadd(self.cache_id .. ":" .. index_key, ttl and (time() + ttl) or "+inf", key_part)
+          red:zadd(self.cache_id .. SEP .. index_key, ttl and (time() + ttl) or "+inf", key_part)
           reason = not reason.fun and { desc = "update()", fun = on_update } or reason
         end
         if index.obsolete or index_key == ngx_null or index_key ~= old_index_key then
           if old_index_key ~= ngx_null then
             -- remove obsolete exists index
-            red:zrem(self.cache_id .. ":" .. old_index_key, key_part)
+            red:zrem(self.cache_id .. SEP .. old_index_key, key_part)
             self:debug("update_index()", function()
-              return "index=", cjson.encode(index), " remove index_key=", old_index_key, " id=", key_part
+              return "index=", cjson.encode(index), " remove index_key=", escape_sep(old_index_key), " id=", escape_sep(key_part)
             end)
             reason = not reason.fun and { desc = "update()", fun = on_update } or reason
           end
@@ -940,7 +945,7 @@ function cache_class:set_unsafe(data, o)
         local dbfield, complex = unpack(todel)
         if complex then
           -- list or set
-          red:del(key .. ":" .. dbfield)
+          red:del(key .. SEP .. dbfield)
         end
         red:hdel(key, dbfield)
       end)
@@ -955,7 +960,7 @@ function cache_class:set_unsafe(data, o)
     -- update sets & lists
 
     local function update_complex(field, fun)
-      local value, key_f = db_data_set[field.dbfield], key .. ":" .. field.dbfield
+      local value, key_f = db_data_set[field.dbfield], key .. SEP .. field.dbfield
       if not value then
         return
       end
@@ -1163,17 +1168,17 @@ function cache_class:delete_unsafe(pk, data, skip_log)
       if next(exists) then
         with_indexes(self, {}, exists, {}, function(index_key)
           if index_key ~= ngx_null then
-            red:zrem(self.cache_id .. ":" .. index_key, key_part)
+            red:zrem(self.cache_id .. SEP .. index_key, key_part)
           end
         end)
       end
   
       red:zrem(self.PK, key_part)
       foreachi(self.sets, function(field)
-        red:del(key .. ":" .. field.dbfield)
+        red:del(key .. SEP .. field.dbfield)
       end)
       foreachi(self.lists, function(field)
-        red:del(key .. ":" .. field.dbfield)
+        red:del(key .. SEP .. field.dbfield)
       end)
     end, self.wait)
 
@@ -1211,7 +1216,7 @@ local function add_to_index(self, pk, data, ttl)
       assert(p, "break")
       tinsert(idx_key, p ~= ngx_null and p or "null")
     end) then
-      idx_key = tconcat(idx_key, ":")
+      idx_key = tconcat(idx_key, SEP)
       tinsert(idx_keys, idx_key)
       if not dict:object_fun(idx_key, function(idx_data, flags)
         idx_data = idx_data or {}
@@ -1224,7 +1229,7 @@ local function add_to_index(self, pk, data, ttl)
         end
         tinsert(idx_data, pk)
         self:debug("add_to_index()", function()
-          return "idx_key=", idx_key, " pk=", json_encode(pk), " data=", json_encode(data), " ttl=", ttl, " index=", json_encode(idx_data)
+          return "idx_key=", escape_sep(idx_key), " pk=", json_encode(pk), " data=", json_encode(data), " ttl=", ttl, " index=", json_encode(idx_data)
         end)
 :: done ::
         return idx_data, flags
@@ -1259,7 +1264,7 @@ local function delete_from_index(self, pk)
       assert(p, "break")
       tinsert(idx_key, p ~= ngx_null and p or "null")
     end) then
-      idx_key = tconcat(idx_key, ":")
+      idx_key = tconcat(idx_key, SEP)
       self.memory.dict:object_fun(idx_key, function(idx_data, flags)
         if idx_data then
           for j,k in ipairs(idx_data)
@@ -1268,7 +1273,7 @@ local function delete_from_index(self, pk)
               -- remove from index
               tremove(idx_data, j)
               self:debug("delete_from_index()", function()
-                return "idx_key=", idx_key, " pk=", json_encode(pk), " index=", json_encode(idx_data)
+                return "idx_key=", escape_sep(idx_key), " pk=", json_encode(pk), " index=", json_encode(idx_data)
               end)
               break
             end
@@ -1593,7 +1598,7 @@ function cache_class:get_by_index(data, o)
       assert(p, "break")
       tinsert(idx_key, p ~= ngx_null and p or "null")
     end) then
-      pk = dict:object_get(tconcat(idx_key, ":"))
+      pk = dict:object_get(tconcat(idx_key, SEP))
       if pk then
         break
       end
@@ -1632,7 +1637,7 @@ local function purge_bulk(self, index, next_keys_fn, prepare_fn)
     for j, key_part in ipairs(bulk)
     do
       bulk[j] = {
-        key = self.cache_id .. ":" .. key_part,
+        key = self.cache_id .. SEP .. key_part,
         key_part = key_part
       }
     end
@@ -1686,17 +1691,17 @@ local function purge_bulk(self, index, next_keys_fn, prepare_fn)
 
           -- remove from XX:key:N set
           foreachi(self.sets, function(field)
-            red:del(key .. ":" .. field.dbfield)
+            red:del(key .. SEP .. field.dbfield)
           end)
 
           -- remove from XX:key:N list
           foreachi(self.lists, function(field)
-            red:del(key .. ":" .. field.dbfield)
+            red:del(key .. SEP .. field.dbfield)
           end)
 
           -- remove indexes
           foreachi(b.index_keys or {}, function(index_key)
-            red:zrem(self.cache_id .. ":" .. index_key, key_part)
+            red:zrem(self.cache_id .. SEP .. index_key, key_part)
           end)
 
           red:del(key)
@@ -1918,7 +1923,7 @@ function cache_class:gc()
       local part = 0
       local start = now()
       repeat
-        cursor, indexes, err = unpack(assert(red:scan(cursor, "count", 100, "match", self.cache_id .. ":*:*")))
+        cursor, indexes, err = unpack(assert(red:scan(cursor, "count", 100, "match", self.cache_id .. SEP .. "*" .. SEP .. "*")))
         assert(not err, err)
         self.redis:handle(function(red)
           local resp = pipeline(red, function()
