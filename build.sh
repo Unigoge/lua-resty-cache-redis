@@ -69,6 +69,17 @@ function build_cJSON() {
   cd ..
 }
 
+function build_int64() {
+  echo "Build int64"
+  cd lua_int64
+  CFLAGS="-I$JIT_PREFIX/usr/local/include/luajit-2.1" make > /dev/null
+  r=$?
+  if [ $r -ne 0 ]; then
+    exit $r
+  fi
+  cd ..
+}
+
 function build_debug() {
   cd nginx-$VERSION$SUFFIX
   echo "Configuring debug nginx-$VERSION$SUFFIX"
@@ -212,7 +223,8 @@ function download() {
 
   download_module simpl       ngx_devel_kit                    master
   download_module ZigzagAK    lua-nginx-module                 mixed
-  download_module ZigzagAK    lua-cjson                        master
+  download_module ZigzagAK    lua-cjson                        mixed
+  download_module ZigzagAK    lua_int64                        master
   download_module openresty   echo-nginx-module                master
 
   download_dep http://zlib.net                                 zlib      $ZLIB_VERSION      tar.gz
@@ -245,6 +257,7 @@ function build() {
   fi
 
   build_cJSON
+  build_int64
 
   make clean > /dev/null 2>&1
   build_debug
@@ -254,6 +267,7 @@ function build() {
 
   install_file  "$JIT_PREFIX/usr/local/lib"           .
   install_file  lua-cjson/cjson.so                    lib/lua/5.1
+  install_file  lua_int64/int64.so                    lib/lua/5.1
 
   cd ..
 }
