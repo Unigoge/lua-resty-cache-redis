@@ -129,7 +129,7 @@ local foreachi, foreach, find_if, find_if_i =
 
 local function check_number(n)
   local tp = type(n)
-  return tp == "number" and number or (
+  return tp == "number" and n or (
     tp == "userdata" and n:tonumber() or tonumber(n)
   )
 end
