@@ -1,5 +1,5 @@
 local _M = {
-  _VERSION = "0.1"
+  _VERSION = "0.2"
 }
 
 local job = require "job"
@@ -99,19 +99,14 @@ function redis_with_sync:do_upsync()
 
   start = now()
 
-  local ok, err = xpcall(redis_with_sync.parse, function(err)
-    self:err("upsync()", traceback())
+  if xpcall(redis_with_sync.parse, function(err)
+    self:err("upsync()", err, "\n", traceback())
     return err
-  end, self, resp)
-  if not ok then
-    self:err("upsync()", function()
-      return err
-    end)
-  end
-
-  lm = resp.headers["Last-Modified"]
-  if lm then
-    self:update_last_modified(lm)
+  end, self, resp) then
+    lm = resp.headers["Last-Modified"]
+    if lm then
+      self:update_last_modified(lm)
+    end
   end
 
   self:info("upsync()", function()

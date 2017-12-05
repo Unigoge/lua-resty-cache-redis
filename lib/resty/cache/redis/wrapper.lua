@@ -1,5 +1,5 @@
 local _M = {
-  _VERSION = "0.1"
+  _VERSION = "0.2"
 }
 
 local redis = require "resty.redis"
@@ -64,7 +64,7 @@ function redis_class:handle(f, upstream, ...)
   assert(red:connect(upstream))
 
   local ok, response, err = xpcall(f, function(err)
-    ngx_log(ERR, traceback())
+    ngx_log(ERR, err, "\n", traceback())
     return err
   end, red, ...)
 
@@ -298,7 +298,7 @@ _M.get_row_result = get_row_result
 
 function _M.check_pipeline(result)
   return xpcall(foreachi, function(err)
-    ngx_log(ERR, traceback())
+    ngx_log(ERR, err, "\n", traceback())
     return err
   end, result, function(row)
     get_row_result(row)

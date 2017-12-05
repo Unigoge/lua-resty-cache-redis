@@ -1,5 +1,5 @@
 local _M = {
-  _VERSION = "0.1"
+  _VERSION = "0.2"
 }
 
 local ftype = {
@@ -41,7 +41,7 @@ end
 
 function _M.safe_call(f, ...)
   local ok, res, err = xpcall(f, function(err)
-    ngx_log(ERR, traceback())
+    ngx_log(ERR, err, "\n", traceback())
     return err
   end, ...)
 
