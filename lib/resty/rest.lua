@@ -172,6 +172,7 @@ local function request(self, opts)
   return resp.status < HTTP_BAD_REQUEST, resp, err
 end
 
+--- @type Rest
 local rest_class = {}
 
 function _M.new(opts)

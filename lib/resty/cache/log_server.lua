@@ -1,3 +1,5 @@
+--- @module RedisLogServer
+
 local _M = {
   _VERSION = "0.1"
 }
@@ -16,8 +18,12 @@ local function make_log_key(T, logid)
   return "L:" .. T .. ":" .. logid
 end
 
+--- @type RedisLogger
+--  @field resty.cache.redis.system#System system
+--  @field resty.cache.redis.tevt#Tevt tevt
 local logger = {}
 
+--- @return #RedisLogger
 function _M.new(cache)
   local CONFIG = ngx.shared.config
   local scope = CONFIG:get("ngx.caches.scope") or "ngx"
@@ -39,6 +45,7 @@ function logger:warn(f, fun)
   self.cache:warn(f, fun)
 end
 
+--- @param #RedisLogger self
 function logger:log_id()
   local log_id = function(red)
     local logid = assert(red:get("L:" .. self.cache_id .. ":ID"))
@@ -47,6 +54,7 @@ function logger:log_id()
   return self.system:handle(log_id, self.system:socket())
 end
 
+--- @param #RedisLogger self
 function logger:next_log_id(i)
   local next_log_id = function(red)
     return assert(red:incrby("L:" .. self.cache_id .. ":ID", i or 1))
@@ -54,10 +62,12 @@ function logger:next_log_id(i)
   return self.system:handle(next_log_id, self.system:socket())
 end
 
+--- @param #RedisLogger self
 function logger:log_event(ev)
   return self:log_events { ev }
 end
 
+--- @param #RedisLogger self
 function logger:log_events(ev)
   local log_events = function(red)
     local logid = self:next_log_id(#ev)
@@ -88,6 +98,7 @@ function logger:log_events(ev)
   return self.tevt:handle(log_events, self.tevt:rw_socket())
 end
 
+--- @param #RedisLogger self
 function logger:get_events(id, limit)
   assert(id, "bad args: id required")
 

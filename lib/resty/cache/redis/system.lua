@@ -1,3 +1,6 @@
+--- @module System
+--  @return #System
+
 local redis = require "resty.cache.redis.wrapper"
 
 local CONFIG = ngx.shared.config
@@ -11,6 +14,7 @@ local system = redis.new {
   idle      = 10
 }
 
+--- @type System
 local system_class = {}
 
 function system_class:socket()

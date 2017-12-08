@@ -2,6 +2,7 @@ local _M = {
   _VERSION = "0.2"
 }
 
+--- @type ftype
 local ftype = {
   NUM    = 1,
   INT64  = 2,

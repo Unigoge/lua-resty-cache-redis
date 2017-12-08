@@ -1,3 +1,5 @@
+--- @module RedisWithUpsync
+
 local _M = {
   _VERSION = "0.2"
 }
@@ -22,6 +24,7 @@ local function now()
 end
 
 local assert = assert
+local setmetatable, getmetatable = setmetatable, getmetatable
 
 local function merge_index(dst, src)
   local mt__index = getmetatable(src).__index
@@ -32,6 +35,9 @@ local function merge_index(dst, src)
   return mt__index
 end
 
+--- @type RedisWithUpsync
+--  @extends resty.cache.redis#Redis
+--  @field resty.cache.redis.wrapper#RedisDistributedLock lock
 local redis_with_sync = {}
 
 function redis_with_sync:parse(resp)
@@ -44,14 +50,17 @@ function redis_with_sync:parse(resp)
   self.upsync.content_handler(self, resp.data)
 end
 
+--- @param #RedisWithUpsync self
 function redis_with_sync:prolong_lock()
   return self.lock:prolong()
 end
 
+--- @param #RedisWithUpsync self
 function redis_with_sync:aquire_lock()
   return self.lock:aquire()
 end
 
+--- @param #RedisWithUpsync self
 function redis_with_sync:do_upsync()
   local start = now()
 
@@ -114,6 +123,7 @@ function redis_with_sync:do_upsync()
   end)
 end
 
+--- @param #RedisWithUpsync self
 function redis_with_sync:init_upsync()
   local prefetch_job = self:init()
 
@@ -147,6 +157,9 @@ function redis_with_sync:init_upsync()
   return prefetch_job
 end
 
+--- @return #RedisWithUpsync
+--  @param #table opts
+--  @param #table redis_opts
 function _M.new(opts, redis_opts)
   assert(opts.upsync, "upsync required { socket, uri, content_handler }")
   opts.prefetch = true
@@ -164,10 +177,9 @@ function _M.new(opts, redis_opts)
     redis_ro  = CONFIG:get(scope .. ".caches." .. storage .. ".ro.socket")        or "unix:logs/" .. storage .. "-ro.sock",
     redis_rw  = CONFIG:get(scope .. ".caches." .. storage .. ".rw.socket")        or "unix:logs/" .. storage .. "-rw.sock"
   })
-  cache = setmetatable(cache, {
+  return assert(setmetatable(cache, {
     __index = merge_index(redis_with_sync, cache)
-  })
-  return cache
+  }))
 end
 
 do

@@ -1,3 +1,5 @@
+--- @module Redis
+
 local _M = {
   _VERSION = "0.1"
 }
@@ -482,6 +484,9 @@ local function from_db(fields, data)
   return out
 end
 
+--- @type Redis
+--  @field resty.cache.log_server#RedisLogger log
+--  @field resty.cache.redis.wrapper#WrapperRedis redis
 local cache_class = {}
 
 local function pstxid()
@@ -561,6 +566,7 @@ function cache_class:make_key(data)
   return tab
 end
 
+--- @param #Redis self
 function cache_class:keys(redis_xx)
   local keys = function(red)
     local keys = assert(self.redis:zscan(red, self.PK, "*"))
@@ -572,6 +578,7 @@ function cache_class:keys(redis_xx)
   return self.redis:handle(keys, redis_xx or self.redis_rw)
 end
 
+--- @param #Redis self
 function cache_class:exists_unsafe(pk, redis_xx)
   if not pk then
     return nil, "bad args: pk required"
@@ -596,10 +603,12 @@ function cache_class:exists_unsafe(pk, redis_xx)
   return self.redis:handle(exists, redis_xx or self.redis_rw)
 end
 
+--- @param #Redis self
 function cache_class:exists(pk)
   return safe_call(self.exists_unsafe, self, pk, self.redis_ro)
 end
 
+--- @param #Redis self
 function cache_class:get_unsafe(pk, redis_xx, getter)
   if not pk then
     return nil, "bad args: pk required"
@@ -694,10 +703,12 @@ function cache_class:get_unsafe(pk, redis_xx, getter)
   return self.redis:handle(get, redis_xx or self.redis_rw)
 end
 
+--- @param #Redis self
 function cache_class:get(pk, getter)
   return safe_call(self.get_unsafe, self, pk, self.redis_ro, getter)
 end
 
+--- @param #Redis self
 function cache_class:get_master(pk, getter)
   return safe_call(self.get_unsafe, self, pk, self.redis_rw, getter)
 end
@@ -722,6 +733,7 @@ local function index_keys(self, data)
   return #index_keys ~= 0 and index_keys or nil
 end
 
+--- @param #Redis self
 function cache_class:search_unsafe(data, redis_xx, getter)
   if not data then
     return nil, "bad args: data required"
@@ -758,10 +770,12 @@ function cache_class:search_unsafe(data, redis_xx, getter)
   return self:get_unsafe(pk, redis_xx, getter)
 end
 
+--- @param #Redis self
 function cache_class:search(data, getter)
   return safe_call(self.search_unsafe, self, data, self.redis_ro, getter)
 end
 
+--- @param #Redis self
 function cache_class:search_master(data, getter)
   return safe_call(self.search_unsafe, self, data, self.redis_rw, getter)
 end
@@ -813,6 +827,7 @@ local function get_indexes_values(self, red, pk)
   return decode_indexes(self, db)
 end
 
+--- @param #Redis self
 function cache_class:set_unsafe(data, o)
   if not data then
     return nil, "bad args: data required"
@@ -1076,10 +1091,12 @@ function cache_class:set_unsafe(data, o)
   return ok, err
 end
 
+--- @param #Redis self
 function cache_class:set(data, o)
   return safe_call(self.set_unsafe, self, data, o)
 end
 
+--- @param #Redis self
 function cache_class:incr_unsafe(data, o)
   if not data then
     return nil, "bad args: pk required"
@@ -1128,10 +1145,12 @@ function cache_class:incr_unsafe(data, o)
   return self:set_unsafe(update_data, o)
 end
 
+--- @param #Redis self
 function cache_class:incr(data, o)
   return safe_call(self.incr_unsafe, self, data, o)
 end
 
+--- @param #Redis self
 function cache_class:delete_unsafe(pk, data, skip_log)
   if not pk then
     return nil, "bad args: pk required"
@@ -1194,10 +1213,12 @@ function cache_class:delete_unsafe(pk, data, skip_log)
   return self.redis:handle(delete, self.redis_rw)
 end
 
+--- @param #Redis self
 function cache_class:delete(pk, data)
   return safe_call(self.delete_unsafe, self, pk, data)
 end
 
+--- @param #Redis self
 function cache_class:log_event(ev, pk, data, ttl)
   return self.log:log_event { ev = ev, pk = pk, data = self.log_data and data or nil, ttl = ttl }
 end
@@ -1527,6 +1548,7 @@ local function get_memory(self, red, pk, callback_fn)
   return val, flags
 end
 
+--- @param #Redis self
 function cache_class:get_memory_slave(pk, callback)
   local data, flags, err = get_memory(self, self.redis_ro, pk, callback)
   if not data then
@@ -1540,11 +1562,13 @@ function cache_class:get_memory_slave(pk, callback)
   return data, data and flags or err
 end
 
+--- @param #Redis self
 function cache_class:get_memory_master(pk, callback)
   local data, flags, err = get_memory(self, self.redis_rw, pk, callback)
   return data, data and flags or err
 end
 
+--- @param #Redis self
 function cache_class:memory_exists(pk)
   local exists
   self:get_memory_slave(pk, function(val, flags)
@@ -1554,6 +1578,7 @@ function cache_class:memory_exists(pk)
   return exists and exists ~= ngx_null 
 end
 
+--- @param #Redis self
 function cache_class:hits(backward, m)
   if not self.memory then
     return nil, "no in-memory data"
@@ -1569,6 +1594,7 @@ function cache_class:hits(backward, m)
   return hits, miss
 end
 
+--- @param #Redis self
 function cache_class:memory_scan(fun)
   foreachi(self.memory.dict:get_keys(0), function(key)
     if not key:match("^%$") then
@@ -1580,6 +1606,7 @@ function cache_class:memory_scan(fun)
   end)
 end
 
+--- @param #Redis self
 function cache_class:get_by_index(data, o)
   assert(self.memory and self.memory.prefetch,
          "index operation is possible only with in-memory caches with prefetch")
@@ -1904,6 +1931,7 @@ local function cleanup_keys(self, red)
   return true
 end
 
+--- @param #Redis self
 function cache_class:gc()
   pcall(cache_desc_fixup, self)
 
@@ -2002,6 +2030,7 @@ function cache_class:gc()
   return "async"
 end
 
+--- @param #Redis self
 function cache_class:purge(max_wait)
   pcall(cache_desc_fixup, self)
 
@@ -2045,6 +2074,7 @@ function cache_class:purge(max_wait)
   return completed and true or "async"
 end
 
+--- @param #Redis self
 function cache_class:last_modified()
   local last_modified = function(red)
     return assert(red:get("L:" .. self.cache_name .. ":last_modified"))
@@ -2052,6 +2082,7 @@ function cache_class:last_modified()
   return self.redis:handle(last_modified, self.redis_rw)
 end
 
+--- @param #Redis self
 function cache_class:update_last_modified(lm)
   local update_last_modified = function(red)
     assert(red:set("L:" .. self.cache_name .. ":last_modified", lm))
@@ -2063,12 +2094,15 @@ function cache_class:update_last_modified(lm)
   return self.redis:handle(update_last_modified, self.redis_rw)
 end
 
+--- @param #Redis self
 function cache_class:create_lock(name, period)
   return self.redis:create_lock(name, period)
 end
 
+--- @type RedisBatch
 local batch_class = {}
 
+--- @param #RedisBatch self
 function batch_class:add(f, ...)
   local fun = self.cache[f]
   if not fun then
@@ -2086,6 +2120,7 @@ function batch_class:add(f, ...)
   return self:flush()
 end
 
+--- @param #RedisBatch self
 function batch_class:flush()
   local threads = {}
 
@@ -2112,15 +2147,18 @@ function batch_class:flush()
   return ok, err
 end
 
+--- @param #RedisBatch self
 function batch_class:results()
   return self.ret
 end
 
+--- @param #RedisBatch self
 function batch_class:cancel()
   self.batch = {}
   self.ret = {}
 end
 
+--- @return #RedisBatch
 function cache_class:create_batch(size)
   return setmetatable({
     size = size,
@@ -2131,10 +2169,12 @@ function cache_class:create_batch(size)
   }, { __index = batch_class })
 end
 
+--- @param #Redis self
 function cache_class:ro_socket()
   return self.redis_ro
 end
 
+--- @param #Redis self
 function cache_class:rw_socket()
   return self.redis_rw
 end
@@ -2170,6 +2210,7 @@ local function init_memory(self)
                                                self.memory.L1.ttl ~= 0 and self.memory.L1.count or 0))
 end
 
+--- @param #Redis self
 function cache_class:init()
   cache_desc_fixup(self)
 
@@ -2239,6 +2280,7 @@ function cache_class:init()
   return prefetch_job
 end
 
+--- @param #Redis self
 function cache_class:desc()
   pcall(cache_desc_fixup)
 
@@ -2262,6 +2304,9 @@ end
 
 -- public api
 
+--- @return #Redis
+--  @param #table opts
+--  @param #table redis_opts
 function _M.new(opts, redis_opts)
   assert(opts.fields and type(opts.fields) == "table", "fields table required")
   assert(opts.cache_id, "cache_id required")
@@ -2343,9 +2388,9 @@ function _M.new(opts, redis_opts)
 
   opts.cleanup_off = CONFIG:get(scope .. ".caches." .. opts.cache_name .. ".cleanup_off")
 
-  local cache = assert(setmetatable(opts, { __index = cache_class }))
+  opts.log = log_server.new(opts)
 
-  opts.log = log_server.new(cache)
+  local cache = assert(setmetatable(opts, { __index = cache_class }))
 
   init_memory(cache)
 

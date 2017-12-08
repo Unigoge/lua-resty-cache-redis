@@ -1,7 +1,13 @@
+--- @module Tevt
+--  @return #Tevt
+
 local redis = require "resty.cache.redis.wrapper"
 
 local CONFIG = ngx.shared.config
 local scope = CONFIG:get("ngx.caches.scope") or "ngx"
+
+--- @type Tevt
+--  @extends resty.cache.redis.wrapper#WrapperRedis
 
 return redis.new {
   timeout   = CONFIG:get(scope .. ".caches.tevt.socket.timeout") or 30000,

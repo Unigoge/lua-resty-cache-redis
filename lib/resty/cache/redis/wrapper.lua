@@ -1,3 +1,5 @@
+--- @module Wrapper
+
 local _M = {
   _VERSION = "0.2"
 }
@@ -10,6 +12,8 @@ local tremove, tinsert = table.remove, table.insert
 local unpack, assert, type, xpcall = unpack, assert, type, xpcall
 local pairs, ipairs, next = pairs, ipairs, next
 local traceback = debug.traceback
+local error = error
+local setmetatable = setmetatable
 
 local update_time = ngx.update_time
 local now, time = ngx.now, ngx.time
@@ -34,8 +38,10 @@ end
 
 --[[ public api --]]
 
+--- @type WrapperRedis
 local redis_class = {}
 
+--- @return #WrapperRedis
 function _M.new(opts)
   assert(opts, "opts required")
   return setmetatable(opts, {
@@ -45,6 +51,7 @@ end
 
 --[[ redis class --]]
 
+--- @return #WrapperRedis
 function redis_class:clone()
   local opts = {}
   foreach(self, function(k,v)
@@ -189,8 +196,10 @@ end
 
 --[[ distributed lock --]]
 
+--- @type RedisDistributedLock
 local lock_class = {}
 
+--- @return #RedisDistributedLock
 function redis_class:create_lock(name, period)
   local t = {
     last_prolong_time = 0,
