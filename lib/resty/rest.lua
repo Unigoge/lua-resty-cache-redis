@@ -1,5 +1,5 @@
 local _M = {
-  _VERSION = "0.1",
+  _VERSION = "0.2",
 
   content_type = {
     x_www_form_urlencoded = "application/x-www-form-urlencoded",
