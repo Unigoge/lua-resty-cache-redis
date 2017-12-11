@@ -1,7 +1,7 @@
 --- @module Redis
 
 local _M = {
-  _VERSION = "0.1"
+  _VERSION = "0.2"
 }
 
 local cjson = require "cjson"
